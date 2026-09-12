@@ -43,6 +43,8 @@ export interface TokenRefreshResult {
   token_type?: string;
 }
 
+export interface AuthorizationCodeTokenResult extends TokenRefreshResult {}
+
 function describeUpstreamError(status: number, body: unknown): string {
   const parsed = (body ?? {}) as {
     title?: string;
@@ -158,6 +160,54 @@ export class XClient {
     const body = (await response.json().catch(() => undefined)) as TokenRefreshResult | undefined;
     if (!response.ok || !body?.access_token) {
       throw new ApiError(502, "token_refresh_failed", "X rejected the token refresh request.");
+    }
+    return body;
+  }
+
+  async exchangeAuthorizationCode(input: {
+    code: string;
+    codeVerifier: string;
+    redirectUri: string;
+    clientId: string;
+    clientSecret?: string;
+  }): Promise<AuthorizationCodeTokenResult> {
+    const url = new URL(`${this.baseUrl}/oauth2/token`);
+    const headers: Record<string, string> = {
+      accept: "application/json",
+      "content-type": "application/x-www-form-urlencoded",
+    };
+    if (input.clientSecret) {
+      headers.authorization = `Basic ${Buffer.from(`${input.clientId}:${input.clientSecret}`).toString("base64")}`;
+    }
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url.toString(), {
+        method: "POST",
+        headers,
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code: input.code,
+          redirect_uri: input.redirectUri,
+          client_id: input.clientId,
+          code_verifier: input.codeVerifier,
+        }),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch {
+      throw new ApiError(
+        504,
+        "upstream_unavailable",
+        "Could not reach X to exchange the authorization code.",
+      );
+    }
+    const body = (await response.json().catch(() => undefined)) as
+      AuthorizationCodeTokenResult | undefined;
+    if (!response.ok || !body?.access_token) {
+      throw new ApiError(
+        502,
+        "oauth_exchange_failed",
+        "X rejected the authorization code exchange.",
+      );
     }
     return body;
   }

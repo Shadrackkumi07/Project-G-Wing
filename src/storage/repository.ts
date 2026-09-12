@@ -4,6 +4,7 @@ import type {
   AccountSnapshotRecord,
   ConnectionRecord,
   PersistentState,
+  OAuthStateRecord,
   PostMetricRecord,
   PostRecord,
   StoredSecret,
@@ -16,6 +17,7 @@ const emptyState = (): PersistentState => ({
   account_snapshots: [],
   posts: [],
   post_metrics: [],
+  oauth_states: [],
 });
 
 /** Atomic, append-friendly persistent store. The JSON format can later be migrated to SQL. */
@@ -25,6 +27,8 @@ export class Repository {
   constructor(private readonly path: string) {
     try {
       this.state = JSON.parse(readFileSync(path, "utf8")) as PersistentState;
+      // Backward-compatible migration for stores created before OAuth support.
+      this.state.oauth_states ??= [];
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       this.state = emptyState();
@@ -80,6 +84,26 @@ export class Repository {
     if (index >= 0) this.state.secrets[index] = secret;
     else this.state.secrets.push(secret);
     this.persist();
+  }
+  deleteSecret(id: string): void {
+    this.state.secrets = this.state.secrets.filter((item) => item.id !== id);
+    this.persist();
+  }
+
+  saveOAuthState(state: OAuthStateRecord): void {
+    const now = Date.now();
+    this.state.oauth_states = this.state.oauth_states.filter(
+      (item) => Date.parse(item.expires_at) > now && item.state !== state.state,
+    );
+    this.state.oauth_states.push(state);
+    this.persist();
+  }
+  takeOAuthState(state: string): OAuthStateRecord | undefined {
+    const index = this.state.oauth_states.findIndex((item) => item.state === state);
+    if (index < 0) return undefined;
+    const [record] = this.state.oauth_states.splice(index, 1);
+    this.persist();
+    return record;
   }
 
   saveSnapshot(

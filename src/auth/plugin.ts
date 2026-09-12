@@ -15,6 +15,13 @@ export interface AuthHookOptions {
   requireHttps: boolean;
 }
 
+/** Enforces HTTPS without requiring an API key (used by OAuth callbacks). */
+export function createHttpsHook(requireHttps: boolean): onRequestHookHandler {
+  return async function requireSecureTransport(request) {
+    if (requireHttps && request.protocol !== "https") throw httpsRequired();
+  };
+}
+
 /** Extracts the secret from /api/chatgpt/:accessToken/:account without logging it. */
 export function tokenFromChatGptPath(url: string): string | null {
   const match = /^\/api\/chatgpt\/([^/?#]+)\//.exec(url);

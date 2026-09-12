@@ -9,6 +9,7 @@ import { XClient } from "./x/client.js";
 import { Repository } from "./storage/repository.js";
 import { CredentialVault } from "./security/credentialVault.js";
 import { ConnectionService } from "./services/connectionService.js";
+import { XOAuthService } from "./services/xOAuthService.js";
 
 function loadDotEnvForLocalDevelopment(): void {
   // Hosting platforms inject real environment variables; a .env file is only a
@@ -42,12 +43,14 @@ async function main(): Promise<void> {
   const repository = new Repository(env.DATA_FILE);
   const vault = new CredentialVault(repository, env.CREDENTIAL_ENCRYPTION_KEY);
   const connectionService = new ConnectionService(repository, vault, client, env);
+  const oauthService = new XOAuthService(repository, vault, client, connectionService, env);
 
   const app = await buildServer({
     env,
     apiKeyStore,
     service,
     connectionService,
+    oauthService,
     chatGptTokenStore,
   });
 

@@ -13,6 +13,9 @@ export type ErrorCode =
   | "account_mismatch"
   | "refresh_unavailable"
   | "token_refresh_failed"
+  | "oauth_not_configured"
+  | "oauth_exchange_failed"
+  | "oauth_state_invalid"
   | "internal_error";
 
 export class ApiError extends Error {

@@ -74,6 +74,14 @@ export interface PostMetricRecord {
   total_engagements: number | null;
 }
 
+/** One-time OAuth state. The matching PKCE verifier is encrypted in secrets. */
+export interface OAuthStateRecord {
+  state: string;
+  verifier_secret_reference: string;
+  expires_at: string;
+  created_at: string;
+}
+
 export interface PersistentState {
   version: 1;
   connections: ConnectionRecord[];
@@ -81,4 +89,5 @@ export interface PersistentState {
   account_snapshots: AccountSnapshotRecord[];
   posts: PostRecord[];
   post_metrics: PostMetricRecord[];
+  oauth_states: OAuthStateRecord[];
 }

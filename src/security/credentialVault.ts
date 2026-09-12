@@ -22,7 +22,7 @@ export class CredentialVault {
     this.key = createHash("sha256").update(masterKey, "utf8").digest();
   }
 
-  store(credentials: XCredentials, existingId?: string): string {
+  store<T>(credentials: T, existingId?: string): string {
     const now = new Date().toISOString();
     const id = existingId ?? `secret_${randomUUID()}`;
     const iv = randomBytes(12);
@@ -43,7 +43,7 @@ export class CredentialVault {
     return id;
   }
 
-  read(id: string): XCredentials {
+  read<T = XCredentials>(id: string): T {
     const secret = this.repository.getSecret(id);
     if (!secret) throw new ConfigError(`Credential secret ${id} does not exist.`);
     const decipher = createDecipheriv("aes-256-gcm", this.key, Buffer.from(secret.iv, "base64"));
@@ -53,6 +53,6 @@ export class CredentialVault {
         decipher.update(Buffer.from(secret.ciphertext, "base64")),
         decipher.final(),
       ]).toString("utf8"),
-    ) as XCredentials;
+    ) as T;
   }
 }

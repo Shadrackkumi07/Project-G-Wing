@@ -13,7 +13,12 @@ import swaggerUi from "@fastify/swagger-ui";
 import type { Env } from "./config/env.js";
 import type { ApiKeyStore } from "./auth/apiKey.js";
 import { extractBearerToken } from "./auth/apiKey.js";
-import { createAuthHook, createChatGptTokenHook, tokenFromChatGptPath } from "./auth/plugin.js";
+import {
+  createAuthHook,
+  createChatGptTokenHook,
+  createHttpsHook,
+  tokenFromChatGptPath,
+} from "./auth/plugin.js";
 import { ApiError } from "./lib/errors.js";
 import { healthRoutes } from "./routes/health.js";
 import { v1Routes } from "./routes/v1.js";
@@ -21,12 +26,15 @@ import type { AnalyticsService } from "./services/analyticsService.js";
 import type { ConnectionService } from "./services/connectionService.js";
 import { openApiSchemas } from "./openapi/schemas.js";
 import { chatGptRoutes } from "./routes/chatgpt.js";
+import { oauthRoutes } from "./routes/oauth.js";
+import type { XOAuthService } from "./services/xOAuthService.js";
 
 export interface BuildServerOptions {
   env: Env;
   apiKeyStore: ApiKeyStore;
   service: AnalyticsService;
   connectionService?: ConnectionService;
+  oauthService?: XOAuthService;
   chatGptTokenStore?: ApiKeyStore;
 }
 
@@ -58,6 +66,7 @@ export async function buildServer({
   apiKeyStore,
   service,
   connectionService,
+  oauthService,
   chatGptTokenStore,
 }: BuildServerOptions): Promise<FastifyInstance> {
   const app = Fastify({
@@ -250,10 +259,18 @@ export async function buildServer({
   await app.register(v1Routes, {
     service,
     connectionService,
+    oauthService,
     authHook,
     rateLimitHook,
     prefix: "/v1",
   });
+  if (oauthService) {
+    await app.register(oauthRoutes, {
+      oauthService,
+      httpsHook: createHttpsHook(env.REQUIRE_HTTPS),
+      rateLimitHook,
+    });
+  }
   if (connectionService && chatGptTokenStore && chatGptRateLimitHook) {
     await app.register(chatGptRoutes, {
       connectionService,

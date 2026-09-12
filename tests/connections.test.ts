@@ -8,6 +8,7 @@ import { CredentialVault } from "../src/security/credentialVault.js";
 import { buildServer } from "../src/server.js";
 import { AnalyticsService } from "../src/services/analyticsService.js";
 import { ConnectionService } from "../src/services/connectionService.js";
+import { XOAuthService } from "../src/services/xOAuthService.js";
 import { Repository } from "../src/storage/repository.js";
 import { XClient, type FetchLike } from "../src/x/client.js";
 import { sampleTweets, sampleUser } from "./fixtures/xApi.js";
@@ -28,6 +29,15 @@ async function fixture(options: { chatGptRateLimitMax?: number } = {}) {
   const path = join(directory, "store.json");
   let now = new Date("2026-09-12T00:00:00.000Z");
   const fetchImpl: FetchLike = async (url) => {
+    if (url.includes("/oauth2/token")) {
+      return Response.json({
+        access_token: "oauth-access-token",
+        refresh_token: "oauth-refresh-token",
+        expires_in: 7200,
+        scope: "tweet.read users.read offline.access",
+        token_type: "bearer",
+      });
+    }
     if (url.includes("/users/me")) return Response.json({ data: sampleUser });
     if (url.includes("/tweets")) {
       const tweets = sampleTweets.map((tweet) => ({
@@ -50,6 +60,9 @@ async function fixture(options: { chatGptRateLimitMax?: number } = {}) {
   const env = loadEnv({
     NODE_ENV: "test",
     CACHE_TTL_SECONDS: "300",
+    X_CLIENT_ID: "test-client-id",
+    X_CLIENT_SECRET: "test-client-secret",
+    X_OAUTH_REDIRECT_URI: "https://example.test/auth/x/callback",
     ...(options.chatGptRateLimitMax
       ? { CHATGPT_RATE_LIMIT_MAX: String(options.chatGptRateLimitMax) }
       : {}),
@@ -60,13 +73,12 @@ async function fixture(options: { chatGptRateLimitMax?: number } = {}) {
     timeoutMs: env.X_TIMEOUT_MS,
     fetchImpl,
   });
-  const connections = new ConnectionService(
+  const vault = new CredentialVault(
     repository,
-    new CredentialVault(repository, "a-test-encryption-key-with-more-than-32-characters"),
-    client,
-    env,
-    () => now,
+    "a-test-encryption-key-with-more-than-32-characters",
   );
+  const connections = new ConnectionService(repository, vault, client, env, () => now);
+  const oauth = new XOAuthService(repository, vault, client, connections, env, () => now);
   const legacy = new AnalyticsService({ accounts: [], client, env, now: () => now });
   const app = await buildServer({
     env,
@@ -74,6 +86,7 @@ async function fixture(options: { chatGptRateLimitMax?: number } = {}) {
     chatGptTokenStore: ApiKeyStore.fromSingleSecret(CHATGPT_TOKEN, "CHATGPT_ACCESS_TOKEN"),
     service: legacy,
     connectionService: connections,
+    oauthService: oauth,
   });
   await app.ready();
   return {
@@ -224,6 +237,50 @@ describe("persistent X connections", () => {
       url: `/api/chatgpt/${CHATGPT_TOKEN}/${sampleUser.id}`,
     });
     expect(limited.statusCode).toBe(429);
+    await app.close();
+  });
+
+  it("starts OAuth with PKCE and automatically detects the callback account", async () => {
+    const { app, path } = await fixture();
+    const start = await app.inject({
+      method: "POST",
+      url: "/v1/oauth/x/authorize",
+      headers: AUTH,
+    });
+    expect(start.statusCode, start.body).toBe(200);
+    const authorizationUrl = new URL(start.json().authorization_url as string);
+    expect(authorizationUrl.origin).toBe("https://x.com");
+    expect(authorizationUrl.pathname).toBe("/i/oauth2/authorize");
+    expect(authorizationUrl.searchParams.get("redirect_uri")).toBe(
+      "https://example.test/auth/x/callback",
+    );
+    expect(authorizationUrl.searchParams.get("code_challenge_method")).toBe("S256");
+    const state = authorizationUrl.searchParams.get("state");
+    expect(state).toBeTruthy();
+
+    const beforeCallback = readFileSync(path, "utf8");
+    expect(beforeCallback).not.toContain("code_verifier");
+
+    const callback = await app.inject({
+      method: "GET",
+      url: `/auth/x/callback?code=authorization-code&state=${encodeURIComponent(state!)}`,
+    });
+    expect(callback.statusCode, callback.body).toBe(200);
+    expect(callback.headers["content-type"]).toContain("text/html");
+    expect(callback.body).toContain(`@${sampleUser.username}`);
+    expect(callback.body).not.toContain("authorization-code");
+    expect(callback.body).not.toContain("oauth-access-token");
+
+    const connections = await app.inject({ method: "GET", url: "/v1/connections", headers: AUTH });
+    expect(connections.json().connections).toHaveLength(1);
+    expect(connections.json().connections[0]).toMatchObject({ x_account_id: sampleUser.id });
+
+    const replay = await app.inject({
+      method: "GET",
+      url: `/auth/x/callback?code=authorization-code&state=${encodeURIComponent(state!)}`,
+    });
+    expect(replay.statusCode).toBe(400);
+    expect(replay.body).not.toContain(state!);
     await app.close();
   });
 });

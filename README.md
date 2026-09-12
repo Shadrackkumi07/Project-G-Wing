@@ -53,6 +53,7 @@ logs and error messages.
 | `GET`    | `/v1/accounts/{accountId}/analytics` | Yes  | Full analytics for one account.                              |
 | `GET`    | `/v1/accounts/{accountId}/tweets`    | Yes  | The posts behind the window, with per-post metrics.          |
 | `GET`    | `/v1/analytics`                      | Yes  | Full analytics for **every** account, reported separately.   |
+| `POST`   | `/v1/oauth/x/authorize`              | Yes  | Create a one-time X OAuth URL for the signed-in X account.   |
 | `POST`   | `/v1/connections/x`                  | Yes  | Validate a user token, detect its account, encrypt it, sync. |
 | `GET`    | `/v1/connections`                    | Yes  | Connection identities and health; never credentials.         |
 | `GET`    | `/v1/connections/{id}`               | Yes  | One safe connection record.                                  |
@@ -237,8 +238,37 @@ others, so it returns 200 and marks that account `"status": "error"` inline.
 
 ## Connecting X accounts
 
-Create one X developer application and set its client ID/secret once. Obtain a
-read-only user-context authorization for each account, then submit each token:
+Create one X developer application and set its client ID/secret once. In the X
+Developer Portal, choose **Web App, Automated App or Bot** and enter these
+values exactly:
+
+| X setting                   | Value for this Render service                         |
+| --------------------------- | ----------------------------------------------------- |
+| Website URL                 | `https://project-g-wing.onrender.com`                 |
+| Callback URI / Redirect URI | `https://project-g-wing.onrender.com/auth/x/callback` |
+
+The callback is **not** `/auth/x`, does not contain an account ID, and must not
+contain your ChatGPT URL token. Set the same callback as the Render environment
+variable `X_OAUTH_REDIRECT_URI`. Request only `tweet.read users.read
+offline.access` scopes. Do not request email unless you have an actual product
+need and X's required legal URLs are configured.
+
+After deployment, start the OAuth connection with your admin API key:
+
+```bash
+curl -X POST https://project-g-wing.onrender.com/v1/oauth/x/authorize \
+  -H "Authorization: Bearer $API_KEY"
+```
+
+Open the returned `authorization_url` in a browser while signed into the X
+account you want to add. X redirects back to `/auth/x/callback`; the service
+exchanges the code, calls X `/2/users/me`, and saves the matching X account ID,
+handle, display name, and encrypted per-account token automatically. Repeat
+this for each X account. There is no account-ID entry step and no code change
+needed for another account.
+
+The direct-token admin route remains available if you already obtain a
+user-context token another way:
 
 ```bash
 curl -X POST https://your-service.example/v1/connections/x \
@@ -289,7 +319,8 @@ Every reusable object and field is also described in `/openapi.json` under
 npm install
 cp .env.example .env
 npm run keygen          # prints an API key and the API_KEY_HASHES value to set
-# edit .env: API_KEY_HASHES, CHATGPT_ACCESS_TOKEN, CREDENTIAL_ENCRYPTION_KEY, X_CLIENT_ID
+# edit .env: API_KEY_HASHES, CHATGPT_ACCESS_TOKEN, CREDENTIAL_ENCRYPTION_KEY,
+#            X_CLIENT_ID, X_CLIENT_SECRET, X_OAUTH_REDIRECT_URI
 npm run dev
 ```
 
@@ -336,15 +367,17 @@ repository directly.
    `healthCheckPath: /healthz`.
 3. Set the secrets it marks `sync: false` in the service's **Environment** tab:
 
-   | Variable                    | Value                                            |
-   | --------------------------- | ------------------------------------------------ |
-   | `API_KEY_HASHES`            | Output of `npm run keygen` (comma-separate more) |
-   | `CHATGPT_ACCESS_TOKEN`      | 32+ character URL-safe random token              |
-   | `CREDENTIAL_ENCRYPTION_KEY` | `openssl rand -base64 48` output                 |
-   | `X_CLIENT_ID`               | Shared X OAuth 2.0 developer app client ID       |
-   | `X_CLIENT_SECRET`           | Shared client secret, if the app is confidential |
+   | Variable                    | Value                                                 |
+   | --------------------------- | ----------------------------------------------------- |
+   | `API_KEY_HASHES`            | Output of `npm run keygen` (comma-separate more)      |
+   | `CHATGPT_ACCESS_TOKEN`      | 32+ character URL-safe random token                   |
+   | `CREDENTIAL_ENCRYPTION_KEY` | `openssl rand -base64 48` output                      |
+   | `X_CLIENT_ID`               | Shared X OAuth 2.0 developer app client ID            |
+   | `X_CLIENT_SECRET`           | Shared client secret, if the app is confidential      |
+   | `X_OAUTH_REDIRECT_URI`      | `https://project-g-wing.onrender.com/auth/x/callback` |
 
-   Add accounts at runtime through `POST /v1/connections/x`.
+   Add each account using `POST /v1/oauth/x/authorize`, then open its returned
+   authorization URL while logged into that X account.
 
 4. Deploy. Render assigns an HTTPS URL and terminates TLS at its load balancer;
    `TRUST_PROXY=true` is already set so the HTTPS check reads
@@ -391,6 +424,8 @@ list.
 | `CREDENTIAL_ENCRYPTION_KEY`  | —                         | Required key used to encrypt all account token sets.        |
 | `X_CLIENT_ID`                | —                         | One shared X developer application client ID.               |
 | `X_CLIENT_SECRET`            | —                         | Shared confidential-client secret, when applicable.         |
+| `X_OAUTH_REDIRECT_URI`       | —                         | Exact X OAuth callback, ending `/auth/x/callback`.          |
+| `X_OAUTH_SCOPES`             | read-only scopes          | OAuth scopes requested for every account connection.        |
 | `DATA_FILE`                  | `./data/x-analytics.json` | Durable encrypted connection and analytics store.           |
 | `SYNC_INTERVAL_SECONDS`      | `900`                     | Background snapshot interval.                               |
 
@@ -414,6 +449,9 @@ list.
 - **ChatGPT is read-only.** `/api/chatgpt/:token/:account` has one GET route;
   no POST, PUT, DELETE, connection health, OAuth, or secret data is reachable
   through it. Its path token is redacted from application logs and error text.
+- **OAuth is account-safe.** The one-time state and PKCE verifier are stored
+  encrypted, expire after ten minutes, and can be used only once. The callback
+  never returns OAuth values; X `/2/users/me` determines the account.
 - **No browser access by default.** `CORS_ORIGINS` is empty, so no web origin
   can call the API until you name one.
 - **Rate limited per key**, keyed by a hash of the presented key rather than the
@@ -439,9 +477,11 @@ src/
   routes/
     health.ts               unauthenticated index and probe
     v1.ts                   the authenticated endpoints
+    oauth.ts                public X OAuth callback only
   services/
     analyticsService.ts     caching, per-account isolation
     connectionService.ts    auto-detection, OAuth lifecycle, sync and summaries
+    xOAuthService.ts        PKCE authorization start and callback completion
   security/
     credentialVault.ts      AES-256-GCM account credential encryption
   storage/

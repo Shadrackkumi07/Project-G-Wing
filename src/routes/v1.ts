@@ -1,12 +1,14 @@
 import type { FastifyPluginAsync, onRequestHookHandler } from "fastify";
 import type { AnalyticsService } from "../services/analyticsService.js";
 import type { ConnectionService, NewConnectionInput } from "../services/connectionService.js";
+import type { XOAuthService } from "../services/xOAuthService.js";
 
 export interface V1RouteOptions {
   service: AnalyticsService;
   authHook: onRequestHookHandler;
   rateLimitHook: onRequestHookHandler;
   connectionService?: ConnectionService;
+  oauthService?: XOAuthService;
 }
 
 const accountParams = {
@@ -113,7 +115,7 @@ const postsResponse = {
  */
 export const v1Routes: FastifyPluginAsync<V1RouteOptions> = async (
   app,
-  { service, authHook, rateLimitHook, connectionService },
+  { service, authHook, rateLimitHook, connectionService, oauthService },
 ) => {
   // Order matters: rate limiting must precede authentication, or an
   // unauthenticated caller could retry keys without ever being throttled.
@@ -216,6 +218,33 @@ export const v1Routes: FastifyPluginAsync<V1RouteOptions> = async (
   );
 
   if (connectionService) {
+    if (oauthService) {
+      app.post(
+        "/oauth/x/authorize",
+        {
+          schema: {
+            tags: ["connections"],
+            summary: "Start X OAuth connection for the X account currently signed in",
+            description:
+              "Returns a one-time X authorization URL. Open it in a browser while signed into " +
+              "the X account to connect. The callback identifies the account automatically.",
+            response: {
+              200: {
+                type: "object",
+                required: ["authorization_url", "expires_at"],
+                properties: {
+                  authorization_url: { type: "string", format: "uri" },
+                  expires_at: { type: "string", format: "date-time" },
+                },
+              },
+            },
+            security: [{ bearerAuth: [] }],
+          },
+        },
+        async () => oauthService.begin(),
+      );
+    }
+
     app.post<{ Body: NewConnectionInput }>(
       "/connections/x",
       {

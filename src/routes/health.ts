@@ -74,6 +74,16 @@ export const healthRoutes: FastifyPluginAsync<HealthRouteOptions> = async (app, 
         },
         {
           method: "POST",
+          path: "/v1/oauth/x/authorize",
+          description: "Create a one-time X OAuth URL for a new account connection.",
+        },
+        {
+          method: "GET",
+          path: "/auth/x/callback",
+          description: "X OAuth redirect target; used only by X after approval.",
+        },
+        {
+          method: "POST",
           path: "/v1/connections/x",
           description: "Validate and add an X user connection.",
         },
