@@ -1,4 +1,4 @@
-# Project G Wing
+# Project G Wing | X ACCOUNT ANALYST GROWTH SYSTEM
 
 **A private, read-only X analytics service that gives ChatGPT the context to understand what is working, what is not, and what to post next.**
 
