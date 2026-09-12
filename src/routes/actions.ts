@@ -37,6 +37,60 @@ function actionOpenApi(baseUrl: string) {
     },
     servers: [{ url: baseUrl }],
     components: {
+      schemas: {
+        ActionAccount: {
+          type: "object",
+          additionalProperties: true,
+          required: ["id", "handle", "display_name", "followers", "following", "total_posts"],
+          properties: {
+            id: { type: "string", description: "Immutable X account ID." },
+            handle: { type: "string", description: "Current X handle without @." },
+            display_name: { type: "string", description: "Current X display name." },
+            followers: { anyOf: [{ type: "number" }, { type: "null" }] },
+            following: { anyOf: [{ type: "number" }, { type: "null" }] },
+            total_posts: { anyOf: [{ type: "number" }, { type: "null" }] },
+            current_timestamp: { anyOf: [{ type: "string" }, { type: "null" }] },
+          },
+        },
+        AnalyticsResponse: {
+          type: "object",
+          additionalProperties: true,
+          required: [
+            "account",
+            "analytics_history",
+            "posts",
+            "summary_7d",
+            "summary_30d",
+            "generated_at",
+          ],
+          properties: {
+            account: { $ref: "#/components/schemas/ActionAccount" },
+            analytics_history: {
+              type: "array",
+              description: "Historical account follower and post-count snapshots.",
+              items: { type: "object", additionalProperties: true, properties: {} },
+            },
+            posts: {
+              type: "array",
+              description: "Posts with current metrics, rates, and relative performance.",
+              items: { type: "object", additionalProperties: true, properties: {} },
+            },
+            summary_7d: {
+              type: "object",
+              description: "Seven-day comparisons, content performance, and follower growth.",
+              additionalProperties: true,
+              properties: {},
+            },
+            summary_30d: {
+              type: "object",
+              description: "Thirty-day comparisons, content performance, and follower growth.",
+              additionalProperties: true,
+              properties: {},
+            },
+            generated_at: { type: "string", format: "date-time" },
+          },
+        },
+      },
       securitySchemes: {
         actionBearerAuth: {
           type: "http",
@@ -68,7 +122,11 @@ function actionOpenApi(baseUrl: string) {
             responses: {
               "200": {
                 description: "Sanitized account analytics.",
-                content: { "application/json": { schema: { type: "object" } } },
+                content: {
+                  "application/json": {
+                    schema: { $ref: "#/components/schemas/AnalyticsResponse" },
+                  },
+                },
               },
               "401": { description: "Missing or invalid Action API key." },
               "429": { description: "Rate limit exceeded." },
