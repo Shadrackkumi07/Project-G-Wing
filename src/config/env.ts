@@ -39,6 +39,8 @@ const envSchema = z.object({
   CREDENTIAL_ENCRYPTION_KEY: z.string().min(32).optional(),
   X_CLIENT_ID: z.string().optional(),
   X_CLIENT_SECRET: z.string().optional(),
+  // Dedicated browser-only secret for starting an X OAuth connection.
+  OAUTH_SETUP_TOKEN: z.string().min(32).optional(),
   // This must exactly match the callback registered in the X Developer Portal.
   X_OAUTH_REDIRECT_URI: z.string().url().optional(),
   X_OAUTH_SCOPES: z.string().min(1).default("tweet.read users.read offline.access"),

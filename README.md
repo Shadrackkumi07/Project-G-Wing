@@ -48,6 +48,7 @@ logs and error messages.
 | `GET`    | `/openapi.json`                      | No   | OpenAPI 3.1 specification.                                   |
 | `GET`    | `/docs`                              | No   | Interactive documentation.                                   |
 | `GET`    | `/api/chatgpt/{token}/{account}`     | URL  | Sanitized, rate-limited GET-only ChatGPT analytics.          |
+| `GET`    | `/auth/x/{setup-token}`              | URL  | Redirect browser to X to connect the signed-in X account.    |
 | `GET`    | `/v1/accounts`                       | Yes  | Legacy and connected accounts, independently identified.     |
 | `GET`    | `/v1/accounts/{accountId}`           | Yes  | Profile and audience snapshot for one account.               |
 | `GET`    | `/v1/accounts/{accountId}/analytics` | Yes  | Full analytics for one account.                              |
@@ -253,19 +254,29 @@ variable `X_OAUTH_REDIRECT_URI`. Request only `tweet.read users.read
 offline.access` scopes. Do not request email unless you have an actual product
 need and X's required legal URLs are configured.
 
-After deployment, start the OAuth connection with your admin API key:
+For the simplest browser-only setup, generate one separate URL secret and set
+it as `OAUTH_SETUP_TOKEN` in Render:
 
 ```bash
-curl -X POST https://project-g-wing.onrender.com/v1/oauth/x/authorize \
-  -H "Authorization: Bearer $API_KEY"
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 ```
 
-Open the returned `authorization_url` in a browser while signed into the X
-account you want to add. X redirects back to `/auth/x/callback`; the service
-exchanges the code, calls X `/2/users/me`, and saves the matching X account ID,
-handle, display name, and encrypted per-account token automatically. Repeat
-this for each X account. There is no account-ID entry step and no code change
-needed for another account.
+Then paste this link into a browser while signed into the X account you want to
+add:
+
+```text
+https://project-g-wing.onrender.com/auth/x/YOUR_OAUTH_SETUP_TOKEN
+```
+
+It redirects to X. Approve access and X redirects back to `/auth/x/callback`;
+the service exchanges the code, calls X `/2/users/me`, and saves the matching X
+account ID, handle, display name, and encrypted per-account token
+automatically. Repeat the same link while signed into each X account. There is
+no account-ID entry step and no code change needed for another account.
+
+Treat this setup link as an admin secret. Do not give it to ChatGPT or share it
+publicly. The API also supports `POST /v1/oauth/x/authorize` for command-line
+or Swagger-based setup with an admin API key.
 
 The direct-token admin route remains available if you already obtain a
 user-context token another way:
@@ -374,6 +385,7 @@ repository directly.
    | `CREDENTIAL_ENCRYPTION_KEY` | `openssl rand -base64 48` output                      |
    | `X_CLIENT_ID`               | Shared X OAuth 2.0 developer app client ID            |
    | `X_CLIENT_SECRET`           | Shared client secret, if the app is confidential      |
+   | `OAUTH_SETUP_TOKEN`         | New 32+ character secret for the one-click OAuth URL  |
    | `X_OAUTH_REDIRECT_URI`      | `https://project-g-wing.onrender.com/auth/x/callback` |
 
    Add each account using `POST /v1/oauth/x/authorize`, then open its returned
@@ -424,6 +436,7 @@ list.
 | `CREDENTIAL_ENCRYPTION_KEY`  | —                         | Required key used to encrypt all account token sets.        |
 | `X_CLIENT_ID`                | —                         | One shared X developer application client ID.               |
 | `X_CLIENT_SECRET`            | —                         | Shared confidential-client secret, when applicable.         |
+| `OAUTH_SETUP_TOKEN`          | —                         | 32+ character secret for the browser OAuth start URL.       |
 | `X_OAUTH_REDIRECT_URI`       | —                         | Exact X OAuth callback, ending `/auth/x/callback`.          |
 | `X_OAUTH_SCOPES`             | read-only scopes          | OAuth scopes requested for every account connection.        |
 | `DATA_FILE`                  | `./data/x-analytics.json` | Durable encrypted connection and analytics store.           |

@@ -32,6 +32,10 @@ async function main(): Promise<void> {
     env.CHATGPT_ACCESS_TOKEN,
     "CHATGPT_ACCESS_TOKEN",
   );
+  const oauthSetupTokenStore = ApiKeyStore.fromSingleSecret(
+    env.OAUTH_SETUP_TOKEN,
+    "OAUTH_SETUP_TOKEN",
+  );
 
   const client = new XClient({ baseUrl: env.X_API_BASE_URL, timeoutMs: env.X_TIMEOUT_MS });
   const service = new AnalyticsService({
@@ -51,6 +55,7 @@ async function main(): Promise<void> {
     service,
     connectionService,
     oauthService,
+    oauthSetupTokenStore,
     chatGptTokenStore,
   });
 

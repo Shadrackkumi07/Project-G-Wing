@@ -17,6 +17,7 @@ import {
   createAuthHook,
   createChatGptTokenHook,
   createHttpsHook,
+  createOAuthSetupTokenHook,
   tokenFromChatGptPath,
 } from "./auth/plugin.js";
 import { ApiError } from "./lib/errors.js";
@@ -35,6 +36,7 @@ export interface BuildServerOptions {
   service: AnalyticsService;
   connectionService?: ConnectionService;
   oauthService?: XOAuthService;
+  oauthSetupTokenStore?: ApiKeyStore;
   chatGptTokenStore?: ApiKeyStore;
 }
 
@@ -58,7 +60,9 @@ function chatGptRateLimitKey(store: ApiKeyStore, url: string, ip: string): strin
 }
 
 function redactChatGptUrl(url: string | undefined): string | undefined {
-  return url?.replace(/(\/api\/chatgpt\/)[^/?#]+/, "$1[redacted]");
+  return url
+    ?.replace(/(\/api\/chatgpt\/)[^/?#]+/, "$1[redacted]")
+    .replace(/(\/auth\/x\/)(?!callback(?:[/?#]|$))[^/?#]+/, "$1[redacted]");
 }
 
 export async function buildServer({
@@ -67,6 +71,7 @@ export async function buildServer({
   service,
   connectionService,
   oauthService,
+  oauthSetupTokenStore,
   chatGptTokenStore,
 }: BuildServerOptions): Promise<FastifyInstance> {
   const app = Fastify({
@@ -269,6 +274,12 @@ export async function buildServer({
       oauthService,
       httpsHook: createHttpsHook(env.REQUIRE_HTTPS),
       rateLimitHook,
+      setupAuthHook: oauthSetupTokenStore
+        ? createOAuthSetupTokenHook({
+            store: oauthSetupTokenStore,
+            requireHttps: env.REQUIRE_HTTPS,
+          })
+        : undefined,
     });
   }
   if (connectionService && chatGptTokenStore && chatGptRateLimitHook) {

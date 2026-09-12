@@ -7,10 +7,15 @@ interface OAuthCallbackQuery {
   error?: string;
 }
 
+interface OAuthSetupParams {
+  setupToken: string;
+}
+
 export interface OAuthRouteOptions {
   oauthService: XOAuthService;
   httpsHook: onRequestHookHandler;
   rateLimitHook: onRequestHookHandler;
+  setupAuthHook?: onRequestHookHandler;
 }
 
 const callbackQuery = {
@@ -29,8 +34,26 @@ const callbackQuery = {
  */
 export const oauthRoutes: FastifyPluginAsync<OAuthRouteOptions> = async (
   app,
-  { oauthService, httpsHook, rateLimitHook },
+  { oauthService, httpsHook, rateLimitHook, setupAuthHook },
 ) => {
+  if (setupAuthHook) {
+    app.get<{ Params: OAuthSetupParams }>(
+      "/auth/x/:setupToken",
+      {
+        onRequest: [rateLimitHook, setupAuthHook],
+        schema: {
+          tags: ["connections"],
+          hide: true,
+          summary: "Start X OAuth from a protected browser URL",
+        },
+      },
+      async (_request, reply) => {
+        const { authorization_url: authorizationUrl } = oauthService.begin();
+        return reply.header("Cache-Control", "no-store").redirect(authorizationUrl);
+      },
+    );
+  }
+
   app.get<{ Querystring: OAuthCallbackQuery }>(
     "/auth/x/callback",
     {

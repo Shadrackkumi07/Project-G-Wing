@@ -51,6 +51,8 @@ services:
         sync: false
       - key: X_CLIENT_SECRET
         sync: false
+      - key: OAUTH_SETUP_TOKEN
+        sync: false
       - key: X_OAUTH_REDIRECT_URI
         sync: false
     disk:

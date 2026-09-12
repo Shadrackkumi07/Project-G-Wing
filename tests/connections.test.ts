@@ -16,6 +16,7 @@ import { sampleTweets, sampleUser } from "./fixtures/xApi.js";
 const KEY = "test-key-that-is-long-enough-123";
 const AUTH = { authorization: `Bearer ${KEY}` };
 const CHATGPT_TOKEN = "chatgpt-test-token-that-is-long-enough-123";
+const OAUTH_SETUP_TOKEN = "oauth-setup-token-that-is-long-enough-123";
 const directories: string[] = [];
 
 afterEach(() => {
@@ -84,6 +85,7 @@ async function fixture(options: { chatGptRateLimitMax?: number } = {}) {
     env,
     apiKeyStore: ApiKeyStore.fromEnv({ plaintextKeys: KEY }),
     chatGptTokenStore: ApiKeyStore.fromSingleSecret(CHATGPT_TOKEN, "CHATGPT_ACCESS_TOKEN"),
+    oauthSetupTokenStore: ApiKeyStore.fromSingleSecret(OAUTH_SETUP_TOKEN, "OAUTH_SETUP_TOKEN"),
     service: legacy,
     connectionService: connections,
     oauthService: oauth,
@@ -243,12 +245,12 @@ describe("persistent X connections", () => {
   it("starts OAuth with PKCE and automatically detects the callback account", async () => {
     const { app, path } = await fixture();
     const start = await app.inject({
-      method: "POST",
-      url: "/v1/oauth/x/authorize",
-      headers: AUTH,
+      method: "GET",
+      url: `/auth/x/${OAUTH_SETUP_TOKEN}`,
     });
-    expect(start.statusCode, start.body).toBe(200);
-    const authorizationUrl = new URL(start.json().authorization_url as string);
+    expect(start.statusCode, start.body).toBe(302);
+    expect(start.headers["cache-control"]).toBe("no-store");
+    const authorizationUrl = new URL(start.headers.location!);
     expect(authorizationUrl.origin).toBe("https://x.com");
     expect(authorizationUrl.pathname).toBe("/i/oauth2/authorize");
     expect(authorizationUrl.searchParams.get("redirect_uri")).toBe(
@@ -281,6 +283,10 @@ describe("persistent X connections", () => {
     });
     expect(replay.statusCode).toBe(400);
     expect(replay.body).not.toContain(state!);
+
+    const denied = await app.inject({ method: "GET", url: "/auth/x/wrong-setup-token" });
+    expect(denied.statusCode).toBe(401);
+    expect(denied.body).not.toContain("wrong-setup-token");
     await app.close();
   });
 });

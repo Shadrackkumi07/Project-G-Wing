@@ -33,6 +33,17 @@ export function tokenFromChatGptPath(url: string): string | null {
   }
 }
 
+/** Extracts the dedicated secret from /auth/x/:setupToken without logging it. */
+export function tokenFromOAuthSetupPath(url: string): string | null {
+  const match = /^\/auth\/x\/([^/?#]+)(?:[/?#]|$)/.exec(url);
+  if (!match?.[1]) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+}
+
 export function createChatGptTokenHook({
   store,
   requireHttps,
@@ -42,6 +53,20 @@ export function createChatGptTokenHook({
     const presented = tokenFromChatGptPath(request.url);
     if (!presented || !store.verify(presented)) {
       throw unauthorized("A valid read-only ChatGPT URL token is required.");
+    }
+  };
+}
+
+/** Guards the browser-only OAuth start URL with a separate setup secret. */
+export function createOAuthSetupTokenHook({
+  store,
+  requireHttps,
+}: AuthHookOptions): onRequestHookHandler {
+  return async function authenticateOAuthSetup(request) {
+    if (requireHttps && request.protocol !== "https") throw httpsRequired();
+    const presented = tokenFromOAuthSetupPath(request.url);
+    if (!presented || !store.verify(presented)) {
+      throw unauthorized("A valid OAuth setup URL token is required.");
     }
   };
 }

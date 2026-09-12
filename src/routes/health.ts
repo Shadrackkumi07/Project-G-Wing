@@ -79,6 +79,11 @@ export const healthRoutes: FastifyPluginAsync<HealthRouteOptions> = async (app, 
         },
         {
           method: "GET",
+          path: "/auth/x/{setup-token}",
+          description: "Protected browser link that starts X OAuth for a new account.",
+        },
+        {
+          method: "GET",
           path: "/auth/x/callback",
           description: "X OAuth redirect target; used only by X after approval.",
         },
