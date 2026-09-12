@@ -20,6 +20,11 @@ const envSchema = z.object({
   API_KEY_HASHES: z.string().optional(),
   CHATGPT_ACCESS_TOKEN: z.string().min(32).optional(),
   CHATGPT_RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(30),
+  // Dedicated key for the small Custom GPT Action surface, separate from
+  // administrator API keys and the legacy URL token.
+  CHATGPT_ACTION_API_KEY: z.string().min(32).optional(),
+  CHATGPT_ACTION_RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(30),
+  PUBLIC_API_BASE_URL: z.string().url().optional(),
 
   REQUIRE_HTTPS: booleanish.optional(),
   TRUST_PROXY: booleanish.default(true),

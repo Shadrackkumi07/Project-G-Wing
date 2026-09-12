@@ -26,6 +26,8 @@ services:
         value: "60"
       - key: CHATGPT_RATE_LIMIT_MAX
         value: "30"
+      - key: CHATGPT_ACTION_RATE_LIMIT_MAX
+        value: "30"
       - key: CACHE_TTL_SECONDS
         value: "300"
       - key: ANALYTICS_TWEET_LIMIT
@@ -42,6 +44,10 @@ services:
       - key: API_KEY_HASHES
         sync: false
       - key: CHATGPT_ACCESS_TOKEN
+        sync: false
+      - key: CHATGPT_ACTION_API_KEY
+        sync: false
+      - key: PUBLIC_API_BASE_URL
         sync: false
       - key: CREDENTIAL_ENCRYPTION_KEY
         sync: false

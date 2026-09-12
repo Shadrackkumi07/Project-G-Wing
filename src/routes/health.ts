@@ -51,6 +51,16 @@ export const healthRoutes: FastifyPluginAsync<HealthRouteOptions> = async (app, 
           path: "/api/chatgpt/{token}/{account}?days=30",
           description: "Sanitized, rate-limited read-only analytics for ChatGPT.",
         },
+        {
+          method: "GET",
+          path: "/actions/openapi.json",
+          description: "Small OpenAPI schema for the Custom GPT Action.",
+        },
+        {
+          method: "GET",
+          path: "/actions/x/{bloomquest|serionflow}?days=30",
+          description: "Sanitized, rate-limited read-only analytics for the Custom GPT Action.",
+        },
         { method: "GET", path: "/v1/accounts", description: "List configured accounts." },
         {
           method: "GET",

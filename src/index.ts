@@ -32,6 +32,9 @@ async function main(): Promise<void> {
     env.CHATGPT_ACCESS_TOKEN,
     "CHATGPT_ACCESS_TOKEN",
   );
+  const chatGptActionKeyStore = env.CHATGPT_ACTION_API_KEY
+    ? ApiKeyStore.fromSingleSecret(env.CHATGPT_ACTION_API_KEY, "CHATGPT_ACTION_API_KEY")
+    : undefined;
   const oauthSetupTokenStore = ApiKeyStore.fromSingleSecret(
     env.OAUTH_SETUP_TOKEN,
     "OAUTH_SETUP_TOKEN",
@@ -58,6 +61,7 @@ async function main(): Promise<void> {
     oauthService,
     oauthSetupTokenStore,
     chatGptTokenStore,
+    chatGptActionKeyStore,
   });
 
   // Periodic snapshots make age-based comparisons possible without requiring a caller.

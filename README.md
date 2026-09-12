@@ -16,8 +16,9 @@ account as an independent encrypted connection.
   restarts and deploys do not erase them.
 - **Accounts never mix.** Every post and snapshot is keyed by X's immutable
   account ID, and replacement credentials must resolve to that same ID.
-- **Two protected surfaces.** Admin routes require an `Authorization` API key;
-  ChatGPT receives a separate URL token with GET-only access.
+- **Three protected surfaces.** Admin routes require an `Authorization` API key;
+  the legacy ChatGPT URL uses a separate URL token; and a Custom GPT Action can
+  use its own narrow Bearer key without exposing a token in the URL.
 
 ## Credential architecture
 
@@ -26,6 +27,7 @@ There are three different credential roles, and they never mix:
 ```
 Admin ── API_KEY ──► this API ── account OAuth token ──► X API
 ChatGPT ── URL token ──► sanitized read-only analytics
+Custom GPT ── Action Bearer key ──► BloomQuest / SerionFlow read-only analytics
                               │
                               ├── one shared X_CLIENT_ID / X_CLIENT_SECRET
                               └── encrypted token per detected X account
@@ -49,6 +51,9 @@ logs and error messages.
 | `GET`    | `/openapi.json`                      | No   | OpenAPI 3.1 specification.                                   |
 | `GET`    | `/docs`                              | No   | Interactive documentation.                                   |
 | `GET`    | `/api/chatgpt/{token}/{account}`     | URL  | Sanitized, rate-limited GET-only ChatGPT analytics.          |
+| `GET`    | `/actions/openapi.json`              | No   | Small OpenAPI schema to import into a Custom GPT Action.     |
+| `GET`    | `/actions/x/bloomquest`              | Yes  | Safe BloomQuest analytics for the Custom GPT Action.         |
+| `GET`    | `/actions/x/serionflow`              | Yes  | Safe SerionFlow analytics for the Custom GPT Action.         |
 | `GET`    | `/auth/x/{setup-token}`              | URL  | Redirect browser to X to connect the signed-in X account.    |
 | `GET`    | `/v1/accounts`                       | Yes  | Legacy and connected accounts, independently identified.     |
 | `GET`    | `/v1/accounts/{accountId}`           | Yes  | Profile and audience snapshot for one account.               |
@@ -89,6 +94,48 @@ Then provide ChatGPT only this URL—not your admin API key or any X token:
 ```text
 https://your-service.onrender.com/api/chatgpt/CHATGPT_ACCESS_TOKEN/123456789?days=30
 ```
+
+### Custom GPT Action (recommended)
+
+This avoids passing a secret in the URL and avoids asking ChatGPT's normal web
+fetcher to interpret your API as a web page. It exposes only two fixed,
+read-only paths; the Custom GPT cannot use its Action key to call `/v1` admin
+routes.
+
+1. Generate a new dedicated key. Do **not** reuse `API_KEY_HASHES`, any X
+   credential, or `CHATGPT_ACCESS_TOKEN`:
+
+   ```bash
+   node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+   ```
+
+2. In Render, add both variables and deploy:
+
+   ```text
+   CHATGPT_ACTION_API_KEY=<the new key>
+   PUBLIC_API_BASE_URL=https://apx.serionflow.com
+   ```
+
+3. Open this URL to confirm the schema is live:
+
+   ```text
+   https://apx.serionflow.com/actions/openapi.json
+   ```
+
+4. In the GPT editor, go to **Actions → Create new action → Import from URL**
+   and paste that schema URL. Set Authentication to **API key → Bearer**, then
+   paste the exact `CHATGPT_ACTION_API_KEY` value. Keep the GPT private.
+
+The Action will call only these two clean URLs internally:
+
+```text
+GET https://apx.serionflow.com/actions/x/bloomquest?days=30
+GET https://apx.serionflow.com/actions/x/serionflow?days=30
+```
+
+Both require the Bearer key; neither contains a secret, account ID, or X token
+in the URL. The response is JSON with `Cache-Control: no-store` and never
+contains credential material.
 
 ### Example
 
@@ -385,6 +432,8 @@ repository directly.
    | --------------------------- | ----------------------------------------------------- |
    | `API_KEY_HASHES`            | Output of `npm run keygen` (comma-separate more)      |
    | `CHATGPT_ACCESS_TOKEN`      | 32+ character URL-safe random token                   |
+   | `CHATGPT_ACTION_API_KEY`    | New 32+ character key used only by the Custom GPT     |
+   | `PUBLIC_API_BASE_URL`       | `https://apx.serionflow.com`                          |
    | `CREDENTIAL_ENCRYPTION_KEY` | `openssl rand -base64 48` output                      |
    | `DATABASE_URL`              | Neon **pooled** PostgreSQL connection string          |
    | `X_CLIENT_ID`               | Shared X OAuth 2.0 developer app client ID            |
@@ -414,42 +463,45 @@ To deploy without the Blueprint, create a Node web service with build command
 All configuration is environment variables; see `.env.example` for the annotated
 list.
 
-| Variable                     | Default                   | Purpose                                                     |
-| ---------------------------- | ------------------------- | ----------------------------------------------------------- |
-| `API_KEY_HASHES`             | —                         | SHA-256 hashes of accepted API keys. One is required.       |
-| `API_KEYS`                   | —                         | Plaintext keys, for local use. Min. 24 characters.          |
-| `CHATGPT_ACCESS_TOKEN`       | —                         | Required 32+ character URL token for GET-only ChatGPT API.  |
-| `CHATGPT_RATE_LIMIT_MAX`     | `30`                      | ChatGPT requests per token per rate-limit window.           |
-| `X_BEARER_TOKEN`             | —                         | X Bearer token shared by all account slots.                 |
-| `X_ACCOUNT_<n>_USERNAME`     | —                         | Handle to expose in slot `n`.                               |
-| `X_ACCOUNT_<n>_ID`           | the handle                | Id used in URLs.                                            |
-| `X_ACCOUNT_<n>_LABEL`        | `@handle`                 | Display name.                                               |
-| `X_ACCOUNT_<n>_BEARER_TOKEN` | `X_BEARER_TOKEN`          | Per-account token override.                                 |
-| `X_USERNAME`                 | —                         | Shorthand for a single account.                             |
-| `PORT`                       | `3000`                    | Listen port. Render sets this.                              |
-| `HOST`                       | `0.0.0.0`                 | Listen address.                                             |
-| `LOG_LEVEL`                  | `info`                    | Pino log level.                                             |
-| `REQUIRE_HTTPS`              | on in production          | Reject plaintext HTTP on `/v1`.                             |
-| `TRUST_PROXY`                | `true`                    | Read `X-Forwarded-*`. Required behind a TLS-terminating LB. |
-| `CORS_ORIGINS`               | none                      | Browser origins allowed. Empty blocks all.                  |
-| `ENABLE_DOCS`                | `true`                    | Serve `/docs`.                                              |
-| `RATE_LIMIT_MAX`             | `60`                      | Requests per key per window.                                |
-| `RATE_LIMIT_WINDOW_SECONDS`  | `60`                      | Window length.                                              |
-| `CACHE_TTL_SECONDS`          | `300`                     | How long X data is reused.                                  |
-| `ANALYTICS_TWEET_LIMIT`      | `100`                     | Posts per account in the window (5–100).                    |
-| `SYNC_POST_LIMIT`            | `500`                     | Posts paginated per persistent sync (5–3200).               |
-| `TOP_TWEETS_COUNT`           | `5`                       | Top posts returned per account.                             |
-| `X_API_BASE_URL`             | `https://api.x.com/2`     | Upstream base URL.                                          |
-| `X_TIMEOUT_MS`               | `10000`                   | Upstream request timeout.                                   |
-| `CREDENTIAL_ENCRYPTION_KEY`  | —                         | Required key used to encrypt all account token sets.        |
-| `X_CLIENT_ID`                | —                         | One shared X developer application client ID.               |
-| `X_CLIENT_SECRET`            | —                         | Shared confidential-client secret, when applicable.         |
-| `OAUTH_SETUP_TOKEN`          | —                         | 32+ character secret for the browser OAuth start URL.       |
-| `X_OAUTH_REDIRECT_URI`       | —                         | Exact X OAuth callback, ending `/auth/x/callback`.          |
-| `X_OAUTH_SCOPES`             | read-only scopes          | OAuth scopes requested for every account connection.        |
-| `DATABASE_URL`               | —                         | Production Postgres/Neon URL; state is stored as JSONB.     |
-| `DATA_FILE`                  | `./data/x-analytics.json` | Local-only JSON fallback; not durable on Render Free.       |
-| `SYNC_INTERVAL_SECONDS`      | `900`                     | Background snapshot interval.                               |
+| Variable                        | Default                   | Purpose                                                         |
+| ------------------------------- | ------------------------- | --------------------------------------------------------------- |
+| `API_KEY_HASHES`                | —                         | SHA-256 hashes of accepted API keys. One is required.           |
+| `API_KEYS`                      | —                         | Plaintext keys, for local use. Min. 24 characters.              |
+| `CHATGPT_ACCESS_TOKEN`          | —                         | Required 32+ character URL token for GET-only ChatGPT API.      |
+| `CHATGPT_RATE_LIMIT_MAX`        | `30`                      | ChatGPT requests per token per rate-limit window.               |
+| `CHATGPT_ACTION_API_KEY`        | —                         | Optional dedicated Bearer key for the narrow Custom GPT Action. |
+| `CHATGPT_ACTION_RATE_LIMIT_MAX` | `30`                      | Custom GPT Action requests per key per rate-limit window.       |
+| `PUBLIC_API_BASE_URL`           | —                         | Public HTTPS base URL placed in the Action OpenAPI schema.      |
+| `X_BEARER_TOKEN`                | —                         | X Bearer token shared by all account slots.                     |
+| `X_ACCOUNT_<n>_USERNAME`        | —                         | Handle to expose in slot `n`.                                   |
+| `X_ACCOUNT_<n>_ID`              | the handle                | Id used in URLs.                                                |
+| `X_ACCOUNT_<n>_LABEL`           | `@handle`                 | Display name.                                                   |
+| `X_ACCOUNT_<n>_BEARER_TOKEN`    | `X_BEARER_TOKEN`          | Per-account token override.                                     |
+| `X_USERNAME`                    | —                         | Shorthand for a single account.                                 |
+| `PORT`                          | `3000`                    | Listen port. Render sets this.                                  |
+| `HOST`                          | `0.0.0.0`                 | Listen address.                                                 |
+| `LOG_LEVEL`                     | `info`                    | Pino log level.                                                 |
+| `REQUIRE_HTTPS`                 | on in production          | Reject plaintext HTTP on `/v1`.                                 |
+| `TRUST_PROXY`                   | `true`                    | Read `X-Forwarded-*`. Required behind a TLS-terminating LB.     |
+| `CORS_ORIGINS`                  | none                      | Browser origins allowed. Empty blocks all.                      |
+| `ENABLE_DOCS`                   | `true`                    | Serve `/docs`.                                                  |
+| `RATE_LIMIT_MAX`                | `60`                      | Requests per key per window.                                    |
+| `RATE_LIMIT_WINDOW_SECONDS`     | `60`                      | Window length.                                                  |
+| `CACHE_TTL_SECONDS`             | `300`                     | How long X data is reused.                                      |
+| `ANALYTICS_TWEET_LIMIT`         | `100`                     | Posts per account in the window (5–100).                        |
+| `SYNC_POST_LIMIT`               | `500`                     | Posts paginated per persistent sync (5–3200).                   |
+| `TOP_TWEETS_COUNT`              | `5`                       | Top posts returned per account.                                 |
+| `X_API_BASE_URL`                | `https://api.x.com/2`     | Upstream base URL.                                              |
+| `X_TIMEOUT_MS`                  | `10000`                   | Upstream request timeout.                                       |
+| `CREDENTIAL_ENCRYPTION_KEY`     | —                         | Required key used to encrypt all account token sets.            |
+| `X_CLIENT_ID`                   | —                         | One shared X developer application client ID.                   |
+| `X_CLIENT_SECRET`               | —                         | Shared confidential-client secret, when applicable.             |
+| `OAUTH_SETUP_TOKEN`             | —                         | 32+ character secret for the browser OAuth start URL.           |
+| `X_OAUTH_REDIRECT_URI`          | —                         | Exact X OAuth callback, ending `/auth/x/callback`.              |
+| `X_OAUTH_SCOPES`                | read-only scopes          | OAuth scopes requested for every account connection.            |
+| `DATABASE_URL`                  | —                         | Production Postgres/Neon URL; state is stored as JSONB.         |
+| `DATA_FILE`                     | `./data/x-analytics.json` | Local-only JSON fallback; not durable on Render Free.           |
+| `SYNC_INTERVAL_SECONDS`         | `900`                     | Background snapshot interval.                                   |
 
 ## Security notes
 

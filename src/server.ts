@@ -28,6 +28,7 @@ import type { ConnectionService } from "./services/connectionService.js";
 import { openApiSchemas } from "./openapi/schemas.js";
 import { chatGptRoutes } from "./routes/chatgpt.js";
 import { oauthRoutes } from "./routes/oauth.js";
+import { actionRoutes } from "./routes/actions.js";
 import type { XOAuthService } from "./services/xOAuthService.js";
 
 export interface BuildServerOptions {
@@ -38,6 +39,7 @@ export interface BuildServerOptions {
   oauthService?: XOAuthService;
   oauthSetupTokenStore?: ApiKeyStore;
   chatGptTokenStore?: ApiKeyStore;
+  chatGptActionKeyStore?: ApiKeyStore;
 }
 
 function rateLimitKey(store: ApiKeyStore, authorization: string | undefined, ip: string): string {
@@ -73,6 +75,7 @@ export async function buildServer({
   oauthService,
   oauthSetupTokenStore,
   chatGptTokenStore,
+  chatGptActionKeyStore,
 }: BuildServerOptions): Promise<FastifyInstance> {
   const app = Fastify({
     trustProxy: env.TRUST_PROXY,
@@ -169,6 +172,22 @@ export async function buildServer({
       }) as onRequestHookHandler)
     : undefined;
 
+  const chatGptActionRateLimitHook: onRequestHookHandler | undefined = chatGptActionKeyStore
+    ? (app.rateLimit({
+        max: env.CHATGPT_ACTION_RATE_LIMIT_MAX,
+        timeWindow: env.RATE_LIMIT_WINDOW_SECONDS * 1000,
+        keyGenerator: (request) =>
+          rateLimitKey(chatGptActionKeyStore, request.headers.authorization, request.ip),
+        errorResponseBuilder: (_request, context) =>
+          new ApiError(
+            429,
+            "rate_limited",
+            `Custom GPT Action rate limit exceeded: at most ${context.max} requests per ${env.RATE_LIMIT_WINDOW_SECONDS}s.`,
+            { retry_after_seconds: Math.ceil(context.ttl / 1000) },
+          ),
+      }) as onRequestHookHandler)
+    : undefined;
+
   await app.register(swagger, {
     refResolver: {
       buildLocalReference(json, _baseUri, _fragment, index) {
@@ -193,6 +212,11 @@ export async function buildServer({
             scheme: "bearer",
             description: "An API key issued for this service. Send over HTTPS only.",
           },
+          actionBearerAuth: {
+            type: "http",
+            scheme: "bearer",
+            description: "The dedicated, read-only Custom GPT Action API key.",
+          },
         },
       },
       tags: [
@@ -202,6 +226,10 @@ export async function buildServer({
         { name: "connections", description: "Administrative X OAuth connection lifecycle." },
         { name: "history", description: "Persistent account and post performance history." },
         { name: "chatgpt", description: "GET-only, sanitized analytics access via URL token." },
+        {
+          name: "custom-gpt-action",
+          description: "GET-only, sanitized analytics for the dedicated Custom GPT Action key.",
+        },
       ],
     },
   });
@@ -291,6 +319,23 @@ export async function buildServer({
       }),
       rateLimitHook: chatGptRateLimitHook,
       prefix: "/api/chatgpt",
+    });
+  }
+  if (
+    connectionService &&
+    chatGptActionKeyStore &&
+    chatGptActionRateLimitHook &&
+    env.PUBLIC_API_BASE_URL
+  ) {
+    await app.register(actionRoutes, {
+      baseUrl: env.PUBLIC_API_BASE_URL.replace(/\/$/, ""),
+      connectionService,
+      authHook: createAuthHook({
+        store: chatGptActionKeyStore,
+        requireHttps: env.REQUIRE_HTTPS,
+      }),
+      rateLimitHook: chatGptActionRateLimitHook,
+      prefix: "/actions",
     });
   }
 

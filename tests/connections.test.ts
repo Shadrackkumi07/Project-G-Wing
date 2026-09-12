@@ -16,6 +16,7 @@ import { sampleTweets, sampleUser } from "./fixtures/xApi.js";
 const KEY = "test-key-that-is-long-enough-123";
 const AUTH = { authorization: `Bearer ${KEY}` };
 const CHATGPT_TOKEN = "chatgpt-test-token-that-is-long-enough-123";
+const CHATGPT_ACTION_KEY = "chatgpt-action-test-key-that-is-long-enough-123";
 const OAUTH_SETUP_TOKEN = "oauth-setup-token-that-is-long-enough-123";
 const directories: string[] = [];
 
@@ -24,7 +25,9 @@ afterEach(() => {
     rmSync(directory, { recursive: true, force: true });
 });
 
-async function fixture(options: { chatGptRateLimitMax?: number } = {}) {
+async function fixture(
+  options: { chatGptRateLimitMax?: number; authenticatedUsername?: string } = {},
+) {
   const directory = mkdtempSync(join(tmpdir(), "x-analytics-test-"));
   directories.push(directory);
   const path = join(directory, "store.json");
@@ -39,7 +42,10 @@ async function fixture(options: { chatGptRateLimitMax?: number } = {}) {
         token_type: "bearer",
       });
     }
-    if (url.includes("/users/me")) return Response.json({ data: sampleUser });
+    if (url.includes("/users/me"))
+      return Response.json({
+        data: { ...sampleUser, username: options.authenticatedUsername ?? sampleUser.username },
+      });
     if (url.includes("/tweets")) {
       const tweets = sampleTweets.map((tweet) => ({
         ...tweet,
@@ -64,6 +70,7 @@ async function fixture(options: { chatGptRateLimitMax?: number } = {}) {
     X_CLIENT_ID: "test-client-id",
     X_CLIENT_SECRET: "test-client-secret",
     X_OAUTH_REDIRECT_URI: "https://example.test/auth/x/callback",
+    PUBLIC_API_BASE_URL: "https://api.example.test",
     ...(options.chatGptRateLimitMax
       ? { CHATGPT_RATE_LIMIT_MAX: String(options.chatGptRateLimitMax) }
       : {}),
@@ -86,6 +93,10 @@ async function fixture(options: { chatGptRateLimitMax?: number } = {}) {
     env,
     apiKeyStore: ApiKeyStore.fromEnv({ plaintextKeys: KEY }),
     chatGptTokenStore: ApiKeyStore.fromSingleSecret(CHATGPT_TOKEN, "CHATGPT_ACCESS_TOKEN"),
+    chatGptActionKeyStore: ApiKeyStore.fromSingleSecret(
+      CHATGPT_ACTION_KEY,
+      "CHATGPT_ACTION_API_KEY",
+    ),
     oauthSetupTokenStore: ApiKeyStore.fromSingleSecret(OAUTH_SETUP_TOKEN, "OAUTH_SETUP_TOKEN"),
     service: legacy,
     connectionService: connections,
@@ -247,6 +258,45 @@ describe("persistent X connections", () => {
       url: `/api/chatgpt/${CHATGPT_TOKEN}/${sampleUser.id}`,
     });
     expect(limited.statusCode).toBe(429);
+    await app.close();
+  });
+
+  it("serves fixed, clean read-only endpoints for the Custom GPT Action", async () => {
+    const { app } = await fixture({ authenticatedUsername: "bloomquestapp" });
+    await app.inject({
+      method: "POST",
+      url: "/v1/connections/x",
+      headers: AUTH,
+      payload: { access_token: "token" },
+    });
+
+    const schema = await app.inject({ method: "GET", url: "/actions/openapi.json" });
+    expect(schema.statusCode).toBe(200);
+    expect(schema.headers["cache-control"]).toBe("no-store");
+    expect(schema.json()).toMatchObject({
+      servers: [{ url: "https://api.example.test" }],
+      paths: {
+        "/actions/x/bloomquest": { get: { operationId: "getBloomquestAnalytics" } },
+        "/actions/x/serionflow": { get: { operationId: "getSerionflowAnalytics" } },
+      },
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/actions/x/bloomquest?days=30",
+      headers: { authorization: `Bearer ${CHATGPT_ACTION_KEY}` },
+    });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.json()).toMatchObject({
+      account: { id: sampleUser.id, handle: "bloomquestapp", followers: 1000 },
+    });
+    expect(response.body).not.toContain(CHATGPT_ACTION_KEY);
+    expect(response.body).not.toContain("credential_secret_reference");
+    expect(response.body).not.toContain("connection_status");
+
+    const denied = await app.inject({ method: "GET", url: "/actions/x/bloomquest?days=30" });
+    expect(denied.statusCode).toBe(401);
     await app.close();
   });
 
