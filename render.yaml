@@ -47,6 +47,8 @@ services:
         sync: false
       - key: CHATGPT_ACTION_API_KEY
         sync: false
+      - key: CHATGPT_ACTION_ACCOUNTS
+        sync: false
       - key: PUBLIC_API_BASE_URL
         sync: false
       - key: CREDENTIAL_ENCRYPTION_KEY

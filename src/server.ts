@@ -28,7 +28,7 @@ import type { ConnectionService } from "./services/connectionService.js";
 import { openApiSchemas } from "./openapi/schemas.js";
 import { chatGptRoutes } from "./routes/chatgpt.js";
 import { oauthRoutes } from "./routes/oauth.js";
-import { actionRoutes } from "./routes/actions.js";
+import { actionRoutes, parseActionAccounts } from "./routes/actions.js";
 import type { XOAuthService } from "./services/xOAuthService.js";
 
 export interface BuildServerOptions {
@@ -329,6 +329,7 @@ export async function buildServer({
   ) {
     await app.register(actionRoutes, {
       baseUrl: env.PUBLIC_API_BASE_URL.replace(/\/$/, ""),
+      accountAliases: parseActionAccounts(env.CHATGPT_ACTION_ACCOUNTS),
       connectionService,
       authHook: createAuthHook({
         store: chatGptActionKeyStore,

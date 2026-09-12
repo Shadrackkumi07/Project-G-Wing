@@ -1,16 +1,48 @@
 import type { FastifyPluginAsync, onRequestHookHandler } from "fastify";
+import { ConfigError } from "../lib/errors.js";
 import type { ConnectionService } from "../services/connectionService.js";
-
-type ActionAccount = "bloomquest" | "serionflow";
 
 interface DaysQuery {
   days?: number;
 }
 
-const accountAliases: Record<ActionAccount, string> = {
+const defaultAccountAliases = {
   bloomquest: "bloomquestapp",
   serionflow: "SerionFlow",
 };
+
+const actionAliasPattern = /^[a-z][a-z0-9-]{0,62}$/;
+
+/**
+ * Turns a friendly environment value into the small, allow-listed Action
+ * surface. It deliberately supports aliases only; arbitrary account ids never
+ * become callable merely because a Custom GPT knows one.
+ */
+export function parseActionAccounts(value: string | undefined): Record<string, string> {
+  if (!value?.trim()) return defaultAccountAliases;
+  const accounts: Record<string, string> = {};
+  for (const entry of value.split(",")) {
+    const [alias, ...targetParts] = entry.split("=");
+    const normalizedAlias = alias?.trim().toLowerCase() ?? "";
+    const target = targetParts.join("=").trim();
+    if (!actionAliasPattern.test(normalizedAlias) || !target || target.includes(",")) {
+      throw new ConfigError(
+        "CHATGPT_ACTION_ACCOUNTS must be comma-separated alias=account values, " +
+          'for example: "brand=brand_handle,personal=my_handle".',
+      );
+    }
+    if (accounts[normalizedAlias]) {
+      throw new ConfigError(
+        `CHATGPT_ACTION_ACCOUNTS contains duplicate alias "${normalizedAlias}".`,
+      );
+    }
+    accounts[normalizedAlias] = target;
+  }
+  if (Object.keys(accounts).length === 0) {
+    throw new ConfigError("CHATGPT_ACTION_ACCOUNTS must include at least one alias=account value.");
+  }
+  return accounts;
+}
 
 const daysQuery = {
   type: "object",
@@ -25,7 +57,7 @@ const daysQuery = {
   },
 } as const;
 
-function actionOpenApi(baseUrl: string) {
+function actionOpenApi(baseUrl: string, accountAliases: Record<string, string>) {
   return {
     openapi: "3.1.0",
     info: {
@@ -101,12 +133,12 @@ function actionOpenApi(baseUrl: string) {
       },
     },
     paths: Object.fromEntries(
-      (Object.keys(accountAliases) as ActionAccount[]).map((account) => [
+      Object.keys(accountAliases).map((account) => [
         `/actions/x/${account}`,
         {
           get: {
             operationId: `get${account[0]!.toUpperCase()}${account.slice(1)}Analytics`,
-            summary: `Get ${account === "bloomquest" ? "BloomQuest" : "SerionFlow"} X analytics`,
+            summary: `Get ${account} X analytics`,
             description:
               "Returns sanitized account history, posts, derived rates, and 7/30-day performance summaries.",
             security: [{ actionBearerAuth: [] }],
@@ -171,6 +203,7 @@ async function analyticsResponse(
 
 export interface ActionRouteOptions {
   baseUrl: string;
+  accountAliases: Record<string, string>;
   connectionService: ConnectionService;
   authHook: onRequestHookHandler;
   rateLimitHook: onRequestHookHandler;
@@ -182,7 +215,7 @@ export interface ActionRouteOptions {
  */
 export const actionRoutes: FastifyPluginAsync<ActionRouteOptions> = async (
   app,
-  { baseUrl, connectionService, authHook, rateLimitHook },
+  { baseUrl, accountAliases, connectionService, authHook, rateLimitHook },
 ) => {
   app.get(
     "/openapi.json",
@@ -193,7 +226,7 @@ export const actionRoutes: FastifyPluginAsync<ActionRouteOptions> = async (
       },
     },
     async (_request, reply) =>
-      reply.header("Cache-Control", "no-store").send(actionOpenApi(baseUrl)),
+      reply.header("Cache-Control", "no-store").send(actionOpenApi(baseUrl, accountAliases)),
   );
 
   app.register(
@@ -201,7 +234,7 @@ export const actionRoutes: FastifyPluginAsync<ActionRouteOptions> = async (
       secured.addHook("onRequest", rateLimitHook);
       secured.addHook("onRequest", authHook);
 
-      secured.get<{ Params: { account: ActionAccount }; Querystring: DaysQuery }>(
+      secured.get<{ Params: { account: string }; Querystring: DaysQuery }>(
         "/x/:account",
         {
           schema: {
@@ -213,7 +246,7 @@ export const actionRoutes: FastifyPluginAsync<ActionRouteOptions> = async (
             params: {
               type: "object",
               required: ["account"],
-              properties: { account: { enum: ["bloomquest", "serionflow"] } },
+              properties: { account: { enum: Object.keys(accountAliases) } },
             },
             querystring: daysQuery,
             security: [{ actionBearerAuth: [] }],
@@ -226,7 +259,7 @@ export const actionRoutes: FastifyPluginAsync<ActionRouteOptions> = async (
             .send(
               await analyticsResponse(
                 connectionService,
-                accountAliases[request.params.account],
+                accountAliases[request.params.account]!,
                 days,
               ),
             );

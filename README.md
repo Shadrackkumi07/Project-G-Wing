@@ -1,589 +1,382 @@
 # Project G Wing
 
-A persistent, read-only X analytics API designed for ChatGPT and other agents.
-It keeps one shared X developer integration while storing each authorized X
-account as an independent encrypted connection.
+**A private, read-only X analytics service that gives ChatGPT the context to understand what is working, what is not, and what to post next.**
 
-- **Read-only.** Nothing in this service can post, delete, follow, or change
-  anything on X. It only reads.
-- **Credentials stay server-side.** Per-account OAuth tokens are AES-256-GCM
-  encrypted at rest and are never returned. Request headers and credential body
-  fields are redacted from logs.
-- **Identity is automatic.** Adding credentials calls X `/users/me`; the X
-  account ID, handle, name, and profile image are detected rather than typed.
-- **History is durable.** In production, encrypted account state and analytics
-  snapshots are stored in PostgreSQL JSONB via `DATABASE_URL`, so Render Free
-  restarts and deploys do not erase them.
-- **Accounts never mix.** Every post and snapshot is keyed by X's immutable
-  account ID, and replacement credentials must resolve to that same ID.
-- **Three protected surfaces.** Admin routes require an `Authorization` API key;
-  the legacy ChatGPT URL uses a separate URL token; and a Custom GPT Action can
-  use its own narrow Bearer key without exposing a token in the URL.
+Project G Wing connects one or more X accounts, keeps their analytics history in PostgreSQL, and exposes a small, safe API for people, automations, and Custom GPTs. It never publishes to X and it never returns X credentials.
 
-## Credential architecture
+> The happy path: connect an X account once → collect history automatically → ask your Custom GPT what to improve → receive two stronger post ideas every day.
 
-There are three different credential roles, and they never mix:
+## What you can do with it
 
-```
-Admin ── API_KEY ──► this API ── account OAuth token ──► X API
-ChatGPT ── URL token ──► sanitized read-only analytics
-Custom GPT ── Action Bearer key ──► BloomQuest / SerionFlow read-only analytics
-                              │
-                              ├── one shared X_CLIENT_ID / X_CLIENT_SECRET
-                              └── encrypted token per detected X account
+- Connect multiple X accounts without manually entering account IDs.
+- Preserve account and post performance history across Render redeploys.
+- Compare today vs. yesterday, 7 days vs. the prior 7, and 30 days vs. the prior 30.
+- See posts, full text, format, media, links, hashtags, engagement, impressions, clicks, and derived rates when X provides them.
+- Ask a Custom GPT for data-backed content recommendations without handing it X OAuth credentials.
+- Add future accounts by completing OAuth again — no new integration or database design required.
+
+## The big picture
+
+```mermaid
+flowchart LR
+  Admin["You / administrator"] -->|"Protected OAuth setup link"| App
+  X["X API"] <-->|"Read-only OAuth"| App["Project G Wing API"]
+  App <-->|"Encrypted state + history"| DB[("PostgreSQL / Neon")]
+  GPT["Private Custom GPT"] -->|"Dedicated Bearer key"| App
+  App -->|"Safe analytics only"| GPT
 ```
 
-A caller proves who it is with an API key you issue. `POST /v1/connections/x`
-is an admin operation using that same protection. Use only read scopes:
-`tweet.read users.read offline.access`; submitted write scopes are rejected.
+One X developer app is shared. Each X account has its **own** encrypted user authorization, so BloomQuest data can never be mixed with SerionFlow data.
 
-ChatGPT has no access to `/v1`. Its only route is
-`GET /api/chatgpt/{token}/{account}?days=30`; it returns safe analytics,
-posts, and 7/30-day summaries only. URL tokens are redacted from application
-logs and error messages.
+```mermaid
+flowchart TD
+  A["Open protected OAuth setup URL"] --> B["Sign in to the intended X account"]
+  B --> C["X sends user back to callback"]
+  C --> D["Project G Wing calls /2/users/me"]
+  D --> E["Automatically saves X ID, handle, name, and encrypted tokens"]
+  E --> F["Sync posts and analytics into history"]
+  F --> G["Custom GPT reads safe performance data"]
+```
 
-## Endpoints
+## Start here
 
-| Method   | Path                                 | Auth | Description                                                  |
-| -------- | ------------------------------------ | ---- | ------------------------------------------------------------ |
-| `GET`    | `/`                                  | No   | Index of available endpoints.                                |
-| `GET`    | `/healthz`                           | No   | Liveness probe.                                              |
-| `GET`    | `/openapi.json`                      | No   | OpenAPI 3.1 specification.                                   |
-| `GET`    | `/docs`                              | No   | Interactive documentation.                                   |
-| `GET`    | `/api/chatgpt/{token}/{account}`     | URL  | Sanitized, rate-limited GET-only ChatGPT analytics.          |
-| `GET`    | `/actions/openapi.json`              | No   | Small OpenAPI schema to import into a Custom GPT Action.     |
-| `GET`    | `/actions/x/bloomquest`              | Yes  | Safe BloomQuest analytics for the Custom GPT Action.         |
-| `GET`    | `/actions/x/serionflow`              | Yes  | Safe SerionFlow analytics for the Custom GPT Action.         |
-| `GET`    | `/auth/x/{setup-token}`              | URL  | Redirect browser to X to connect the signed-in X account.    |
-| `GET`    | `/v1/accounts`                       | Yes  | Legacy and connected accounts, independently identified.     |
-| `GET`    | `/v1/accounts/{accountId}`           | Yes  | Profile and audience snapshot for one account.               |
-| `GET`    | `/v1/accounts/{accountId}/analytics` | Yes  | Full analytics for one account.                              |
-| `GET`    | `/v1/accounts/{accountId}/tweets`    | Yes  | The posts behind the window, with per-post metrics.          |
-| `GET`    | `/v1/analytics`                      | Yes  | Full analytics for **every** account, reported separately.   |
-| `POST`   | `/v1/oauth/x/authorize`              | Yes  | Create a one-time X OAuth URL for the signed-in X account.   |
-| `POST`   | `/v1/connections/x`                  | Yes  | Validate a user token, detect its account, encrypt it, sync. |
-| `GET`    | `/v1/connections`                    | Yes  | Connection identities and health; never credentials.         |
-| `GET`    | `/v1/connections/{id}`               | Yes  | One safe connection record.                                  |
-| `PUT`    | `/v1/connections/{id}`               | Yes  | Replace credentials after same-account validation.           |
-| `POST`   | `/v1/connections/{id}/test`          | Yes  | Revalidate identity and health.                              |
-| `POST`   | `/v1/connections/{id}/refresh`       | Yes  | Refresh OAuth credentials.                                   |
-| `POST`   | `/v1/connections/{id}/sync`          | Yes  | Immediately capture a durable analytics snapshot.            |
-| `DELETE` | `/v1/connections/{id}`               | Yes  | Remove connection and encrypted secret.                      |
-| `GET`    | `/v1/analytics/{account}?days=30`    | Yes  | Account history and follower growth.                         |
-| `GET`    | `/v1/posts/{account}?days=30`        | Yes  | Posts, current metrics, rates, and relative performance.     |
-| `GET`    | `/v1/posts/{account}/{post_id}`      | Yes  | Full post and all age/milestone snapshots.                   |
-| `GET`    | `/v1/summary/{account}?days=7`       | Yes  | Comparisons, averages, best/worst, topics, and formats.      |
+Choose the path that fits you:
 
-For connected accounts, `{account}` accepts the connection ID, immutable X
-account ID, or current handle. Prefer the X account ID so handle changes never
-change URLs. Legacy environment slots remain supported for compatibility.
+| I want to…                               | Start with                                                            |
+| ---------------------------------------- | --------------------------------------------------------------------- |
+| Run this project myself                  | [Deploy your own copy](#deploy-your-own-copy)                         |
+| Connect my first X account               | [Connect X accounts](#connect-x-accounts)                             |
+| Give a Custom GPT safe access            | [Set up a Custom GPT Action](#set-up-a-custom-gpt-action-recommended) |
+| Inspect every endpoint in a browser      | `https://YOUR_API_DOMAIN/docs`                                        |
+| Use the hosted Project G Wing deployment | [Live API documentation](https://apx.serionflow.com/docs)             |
 
-An agent can discover everything from `GET /` and `GET /openapi.json` without
-being told the shape in advance.
+## What is safe to share?
 
-### ChatGPT URL
+| Share with                        | Safe to share                                                          | Never share                                                  |
+| --------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Custom GPT                        | Its dedicated `CHATGPT_ACTION_API_KEY`, entered in the GPT editor only | X client secret, X OAuth tokens, database URL, admin API key |
+| Your browser during account setup | The protected OAuth setup link                                         | The raw `OAUTH_SETUP_TOKEN` in public posts or screenshots   |
+| Admin tools / Swagger             | Your admin API key in an Authorization header                          | API key hashes, encryption key, X token set                  |
+| GitHub                            | `.env.example` only                                                    | `.env`, Render environment values, Neon connection strings   |
 
-Generate the URL token once and set it as `CHATGPT_ACCESS_TOKEN` on Render:
+The service encrypts account credentials with AES-256-GCM, redacts sensitive request fields from logs, and returns sanitized analytics only.
+
+## Deploy your own copy
+
+### What you need
+
+1. A [Render](https://render.com/) account for hosting.
+2. A free [Neon](https://neon.com/) PostgreSQL database for durable storage.
+3. An X developer app with OAuth 2.0 enabled.
+4. A domain is optional, but recommended for a cleaner Custom GPT Action URL.
+
+### 1. Create the Render service
+
+This repository includes [`render.yaml`](render.yaml). In Render:
+
+1. Choose **New → Blueprint**.
+2. Select this GitHub repository.
+3. Render detects the Blueprint and creates a Node web service.
+4. Use the default build command: `npm ci && npm run build`.
+5. Use the default start command: `npm start`.
+
+Render supplies `PORT` automatically. Do not add your own `PORT` variable.
+
+### 2. Create durable storage in Neon
+
+1. Create a project in [Neon](https://console.neon.tech/).
+2. Open **Connect** and choose the **Pooled** connection string.
+3. Copy the complete PostgreSQL URL.
+4. In Render → your service → **Environment**, add it as `DATABASE_URL`.
+
+The database stores encrypted connection details plus account snapshots, posts, and metric snapshots. It is what keeps your history when a free Render service restarts.
+
+### 3. Add environment variables in Render
+
+In Render → your service → **Environment**, add the following. Keep all secret values private.
+
+| Variable                    | What to enter                                         | Required for                        |
+| --------------------------- | ----------------------------------------------------- | ----------------------------------- |
+| `API_KEY_HASHES`            | Hash printed by `npm run keygen`                      | Admin API and Swagger               |
+| `CHATGPT_ACCESS_TOKEN`      | A 32+ character random URL-safe token                 | Legacy URL-token endpoint           |
+| `CREDENTIAL_ENCRYPTION_KEY` | Output of `openssl rand -base64 48`                   | Encrypting X tokens at rest         |
+| `DATABASE_URL`              | Neon **pooled** PostgreSQL connection string          | Durable history                     |
+| `X_CLIENT_ID`               | X developer app client ID                             | X OAuth                             |
+| `X_CLIENT_SECRET`           | X app client secret for confidential apps             | X OAuth, if supplied by X           |
+| `OAUTH_SETUP_TOKEN`         | A separate 32+ character random URL-safe token        | Starting account OAuth in a browser |
+| `X_OAUTH_REDIRECT_URI`      | Your exact callback URL, ending in `/auth/x/callback` | X OAuth                             |
+
+For a Custom GPT Action, also add:
+
+| Variable                  | Example                                 | Purpose                                    |
+| ------------------------- | --------------------------------------- | ------------------------------------------ |
+| `CHATGPT_ACTION_API_KEY`  | A new 32+ character random value        | The GPT's narrow, read-only key            |
+| `PUBLIC_API_BASE_URL`     | `https://api.example.com`               | Your verified public API domain            |
+| `CHATGPT_ACTION_ACCOUNTS` | `brand=brand_handle,personal=my_handle` | Friendly action URLs for selected accounts |
+
+Generate secrets with these commands:
 
 ```bash
+# Admin API key and its server-side hash
+npm run keygen
+
+# Each of these should be generated separately
 node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+openssl rand -base64 48
 ```
 
-Then provide ChatGPT only this URL—not your admin API key or any X token:
+Use the raw API key from `npm run keygen` only as an administrator. Put the printed hash in `API_KEY_HASHES`.
+
+### 4. Configure your X developer app
+
+In the [X Developer Portal](https://developer.x.com/), configure one OAuth 2.0 **Web App, Automated App or Bot** application.
+
+Use your real public API domain consistently:
+
+| X setting               | Example                                   |
+| ----------------------- | ----------------------------------------- |
+| Website URL             | `https://api.example.com`                 |
+| Callback / Redirect URI | `https://api.example.com/auth/x/callback` |
+| OAuth scopes            | `tweet.read users.read offline.access`    |
+
+Copy that exact callback URI into `X_OAUTH_REDIRECT_URI` in Render. Even a small mismatch causes X OAuth to fail.
+
+`offline.access` lets the service refresh account access safely. The service rejects write scopes, so it cannot post, follow, delete, or change anything on X.
+
+Helpful references: [X OAuth 2.0 authorization code flow](https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code), [Render custom domains](https://render.com/docs/custom-domains), and [Neon connection strings](https://neon.com/docs/connect/connect-from-any-app).
+
+## Connect X accounts
+
+After Render has deployed, open this address in a browser while signed in to the X account you want to connect:
 
 ```text
-https://your-service.onrender.com/api/chatgpt/CHATGPT_ACCESS_TOKEN/123456789?days=30
+https://YOUR_API_DOMAIN/auth/x/YOUR_OAUTH_SETUP_TOKEN
 ```
 
-### Custom GPT Action (recommended)
+For example, a service hosted at `https://api.example.com` uses:
 
-This avoids passing a secret in the URL and avoids asking ChatGPT's normal web
-fetcher to interpret your API as a web page. It exposes only two fixed,
-read-only paths; the Custom GPT cannot use its Action key to call `/v1` admin
-routes.
+```text
+https://api.example.com/auth/x/YOUR_OAUTH_SETUP_TOKEN
+```
 
-1. Generate a new dedicated key. Do **not** reuse `API_KEY_HASHES`, any X
-   credential, or `CHATGPT_ACCESS_TOKEN`:
+Approve the X prompt. Project G Wing then automatically discovers the account with X’s authenticated-user endpoint and stores:
 
-   ```bash
-   node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
-   ```
+- immutable X account ID
+- handle and display name
+- profile image, when supplied by X
+- encrypted access and refresh token references
+- connection health and last successful sync
 
-2. In Render, add both variables and deploy:
+Repeat the same process while signed into your second, third, or fourth X account. You do **not** type an account ID manually.
+
+### Confirm a connection
+
+Open your API docs:
+
+```text
+https://YOUR_API_DOMAIN/docs
+```
+
+Run `GET /v1/connections`, click **Authorize**, and enter your admin API key as:
+
+```text
+Bearer YOUR_ADMIN_API_KEY
+```
+
+You should see safe account information such as the X account ID, handle, status, and last sync time — never tokens or secrets.
+
+## Set up a Custom GPT Action (recommended)
+
+The Action is the cleanest way to let ChatGPT analyze your data. The GPT receives a dedicated Bearer key and can call only the selected, read-only account routes. It does not receive account IDs, URL tokens, X credentials, or admin access.
+
+### Choose friendly account names
+
+Set `CHATGPT_ACTION_ACCOUNTS` in Render. The format is:
+
+```text
+friendly-name=x-handle-or-account-id,another-name=another-handle
+```
+
+Example:
+
+```text
+brand=brand_handle,founder=founder_handle
+```
+
+This creates these Action endpoints after deployment:
+
+```text
+GET /actions/x/brand?days=30
+GET /actions/x/founder?days=30
+```
+
+If you leave this variable empty, the starter mapping remains:
+
+```text
+bloomquest=bloomquestapp,serionflow=SerionFlow
+```
+
+### Create the GPT
+
+1. Go to [the GPT editor](https://chatgpt.com/gpts/editor) and choose **Create**.
+2. Open **Configure** and scroll to **Actions**.
+3. Choose **Create new action** → **Import from URL**.
+4. Paste:
 
    ```text
-   CHATGPT_ACTION_API_KEY=<the new key>
-   PUBLIC_API_BASE_URL=https://apx.serionflow.com
+   https://YOUR_API_DOMAIN/actions/openapi.json
    ```
 
-3. Open this URL to confirm the schema is live:
+5. Click the Authentication gear, choose **API key → Bearer**, and enter the exact `CHATGPT_ACTION_API_KEY` value from Render.
+6. Test each detected action in the Preview panel.
+7. Keep the GPT private while testing, then click **Create**.
 
-   ```text
-   https://apx.serionflow.com/actions/openapi.json
-   ```
+Use a supported non-Pro model mode for Actions. See [OpenAI’s Action setup guide](https://help.openai.com/en/articles/9442513) for the current GPT editor details.
 
-4. In the GPT editor, go to **Actions → Create new action → Import from URL**
-   and paste that schema URL. Set Authentication to **API key → Bearer**, then
-   paste the exact `CHATGPT_ACTION_API_KEY` value. Keep the GPT private.
+### Suggested GPT instructions
 
-The Action will call only these two clean URLs internally:
+Paste this into your Custom GPT’s **Instructions** field:
 
 ```text
-GET https://apx.serionflow.com/actions/x/bloomquest?days=30
-GET https://apx.serionflow.com/actions/x/serionflow?days=30
+You are an X growth analyst.
+
+Before making performance claims or writing recommendations, call the relevant analytics action.
+
+For each requested account:
+- Analyze recent posts, engagement, impressions, formats, hooks, topics, CTAs, links, posting times, and follower movement.
+- Clearly separate data-backed facts from recommendations.
+- Identify what worked, what underperformed, and the evidence for each conclusion.
+- Recommend exactly two stronger posts, ready to publish on X.
+- Briefly explain why each proposed post should perform better.
+- Never invent metrics, results, or trends that are absent from the API response.
 ```
 
-Both require the Bearer key; neither contains a secret, account ID, or X token
-in the URL. The response is JSON with `Cache-Control: no-store` and never
-contains credential material.
-
-### Example
-
-```bash
-curl -H "Authorization: Bearer $API_KEY" \
-  https://your-service.onrender.com/v1/accounts/main/analytics
-```
-
-```jsonc
-{
-  "data": {
-    "account": { "id": "main", "label": "Personal", "username": "sampleaccount" },
-    "profile": {
-      "x_user_id": "1234567890",
-      "username": "sampleaccount",
-      "name": "Sample Account",
-      "description": "A fixture account.",
-      "location": "Fargo, ND",
-      "website": "https://example.com",
-      "profile_image_url": "https://pbs.twimg.com/profile_images/sample.jpg",
-      "joined_at": "2020-05-15T08:30:00.000Z",
-      "account_age_days": 2310,
-      "protected": false,
-      "verified": false,
-      "verified_type": "none",
-    },
-    "audience": {
-      "followers": 1000,
-      "following": 250,
-      "follower_following_ratio": 4,
-      "listed": 42,
-    },
-    "lifetime": { "tweets": 5000, "likes_given": 8000 },
-    "window": {
-      "tweets_analyzed": 4,
-      "oldest_tweet_at": "2026-09-01T10:00:00.000Z",
-      "newest_tweet_at": "2026-09-04T10:00:00.000Z",
-      "days_covered": 3,
-    },
-    "engagement": {
-      "totals": {
-        "likes": 130,
-        "retweets": 63,
-        "replies": 6,
-        "quotes": 3,
-        "bookmarks": 4,
-        "impressions": null,
-        "engagements": 206,
-      },
-      "averages_per_tweet": {
-        "likes": 32.5,
-        "retweets": 15.75,
-        "replies": 1.5,
-        "quotes": 0.75,
-        "bookmarks": 1,
-        "impressions": null,
-        "engagements": 51.5,
-      },
-      "engagement_rate_per_impression": null,
-      "engagement_rate_per_follower": 0.0515,
-    },
-    "composition": {
-      "original": { "count": 1, "share": 0.25 },
-      "reply": { "count": 1, "share": 0.25 },
-      "retweet": { "count": 1, "share": 0.25 },
-      "quote": { "count": 1, "share": 0.25 },
-    },
-    "cadence": {
-      "tweets_per_day": 1.33,
-      "busiest_hour_utc": 10,
-      "busiest_weekday_utc": "Tuesday",
-      "by_hour_utc": { "00:00": 0, "01:00": 0, "10:00": 3, "14:00": 1 }, // all 24 hours present
-      "by_weekday_utc": {
-        "Sunday": 0,
-        "Monday": 0,
-        "Tuesday": 1,
-        "Wednesday": 1,
-        "Thursday": 1,
-        "Friday": 1,
-        "Saturday": 0,
-      },
-    },
-    "top_tweets": [
-      {
-        "id": "101",
-        "url": "https://x.com/sampleaccount/status/101",
-        "created_at": "2026-09-01T10:00:00.000Z",
-        "text_preview": "An original post about shipping things.",
-        "kind": "original",
-        "likes": 100,
-        "retweets": 10,
-        "replies": 5,
-        "quotes": 2,
-        "bookmarks": 3,
-        "impressions": null,
-        "engagements": 120,
-      },
-    ],
-    "notes": [
-      "Impression counts are not available for these credentials. X only returns impression_count to a user-context token for the authenticated user's own posts, so engagement rate falls back to a per-follower figure.",
-    ],
-    "generated_at": "2026-09-12T00:00:00.000Z",
-    "source": "x-api-v2",
-  },
-  "meta": { "cached": false, "cache_age_seconds": 0, "cache_ttl_seconds": 300 },
-}
-```
-
-### How the numbers are defined
-
-- **engagements** = likes + retweets + replies + quotes + bookmarks.
-- **window** is the most recent `ANALYTICS_TWEET_LIMIT` posts (default 100, X's
-  per-page maximum) — not a fixed date range. `window` states exactly which
-  posts were covered.
-- **composition** classifies each post as `retweet` > `quote` > `reply` >
-  `original`. A post can carry several relationships at once (a quote that is
-  also a reply), so the most specific one wins.
-- **cadence** is in UTC. `tweets_per_day` is omitted when the window spans less
-  than a day, because a shorter span would inflate it.
-- **`null` means unknown, not zero.** Anything X did not return is `null`, and
-  `notes` explains why.
-- **impressions** are only returned by X to a _user-context_ token for that
-  user's own posts. With an app-only Bearer token they are `null` and
-  `engagement_rate_per_impression` is `null` too;
-  `engagement_rate_per_follower` is always available as a fallback.
-
-### Errors
-
-Every error uses the same envelope:
-
-```json
-{ "error": { "code": "not_found", "message": "…", "details": {} } }
-```
-
-| Status | `code`                  | Meaning                                           |
-| ------ | ----------------------- | ------------------------------------------------- |
-| 400    | `bad_request`           | Malformed request, e.g. an invalid account id.    |
-| 401    | `unauthorized`          | API key missing or not recognised.                |
-| 403    | `https_required`        | Request arrived over plaintext HTTP.              |
-| 404    | `not_found`             | Unknown account id or route. Lists the valid ids. |
-| 429    | `rate_limited`          | You exceeded this service's own rate limit.       |
-| 429    | `upstream_rate_limited` | X's rate limit for your credentials is exhausted. |
-| 502    | `upstream_unauthorized` | X rejected the configured credentials.            |
-| 502    | `upstream_error`        | X returned an unexpected error.                   |
-| 504    | `upstream_unavailable`  | X did not respond in time.                        |
-
-`GET /v1/analytics` is the exception: one broken account must not hide the
-others, so it returns 200 and marks that account `"status": "error"` inline.
-
-## Connecting X accounts
-
-Create one X developer application and set its client ID/secret once. In the X
-Developer Portal, choose **Web App, Automated App or Bot** and enter these
-values exactly:
-
-| X setting                   | Value for this Render service                         |
-| --------------------------- | ----------------------------------------------------- |
-| Website URL                 | `https://project-g-wing.onrender.com`                 |
-| Callback URI / Redirect URI | `https://project-g-wing.onrender.com/auth/x/callback` |
-
-The callback is **not** `/auth/x`, does not contain an account ID, and must not
-contain your ChatGPT URL token. Set the same callback as the Render environment
-variable `X_OAUTH_REDIRECT_URI`. Request only `tweet.read users.read
-offline.access` scopes. Do not request email unless you have an actual product
-need and X's required legal URLs are configured.
-
-For the simplest browser-only setup, generate one separate URL secret and set
-it as `OAUTH_SETUP_TOKEN` in Render:
-
-```bash
-node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
-```
-
-Then paste this link into a browser while signed into the X account you want to
-add:
+Try this first prompt:
 
 ```text
-https://project-g-wing.onrender.com/auth/x/YOUR_OAUTH_SETUP_TOKEN
+Analyze the last 30 days for every connected account. What is working, what is underperforming, and what two posts should each account publish today?
 ```
 
-It redirects to X. Approve access and X redirects back to `/auth/x/callback`;
-the service exchanges the code, calls X `/2/users/me`, and saves the matching X
-account ID, handle, display name, and encrypted per-account token
-automatically. Repeat the same link while signed into each X account. There is
-no account-ID entry step and no code change needed for another account.
+## API guide
 
-Treat this setup link as an admin secret. Do not give it to ChatGPT or share it
-publicly. The API also supports `POST /v1/oauth/x/authorize` for command-line
-or Swagger-based setup with an admin API key.
+Your interactive API reference lives at:
 
-The direct-token admin route remains available if you already obtain a
-user-context token another way:
-
-```bash
-curl -X POST https://your-service.example/v1/connections/x \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "access_token": "...",
-    "refresh_token": "...",
-    "token_expires_at": "2026-09-12T17:00:00Z",
-    "scope": "tweet.read users.read offline.access"
-  }'
+```text
+https://YOUR_API_DOMAIN/docs
 ```
 
-The service immediately calls X `/users/me`, rejects invalid credentials,
-saves the detected immutable X account ID, encrypts both tokens, and performs
-the first sync. Re-authorizing an already-connected X account securely replaces
-its saved credentials while preserving its analytics history. Repeat this
-request for every account—no source code or manual handle mapping is needed.
+The machine-readable OpenAPI document is at:
 
-### Historical field guide
+```text
+https://YOUR_API_DOMAIN/openapi.json
+```
 
-- Connection records contain `id`, `platform`, `x_account_id`, `username`,
-  `display_name`, `profile_image_url`, `connection_status`, `token_expires_at`,
-  `last_synced_at`, `last_error`, `created_at`, and `updated_at`.
-- Account snapshots contain `captured_at`, `followers`, `following`,
-  `total_posts`, and `listed`.
-- Stored posts preserve full `text`, `created_at`, canonical `url`, language,
-  original/reply/quote/repost flags, media types, URL presence and expanded
-  URLs, hashtags, mentions, conversation ID, and sensitivity flag.
-- Every retained metric snapshot contains its capture time and post age plus
-  impressions, likes, replies, reposts, quotes, bookmarks, profile clicks, URL
-  clicks, and total engagements. Unavailable X metrics are `null`, never a
-  fabricated zero.
-- Derived post metrics include engagement, like, reply, repost, click-through,
-  and profile-visit rates, plus performance relative to the account's recent
-  average.
-- Post detail retains an initial snapshot plus the first snapshot at or after 1
-  hour, 6 hours, 24 hours, 3 days, 7 days, and 30 days. This keeps the required
-  age comparisons without storing duplicate 15-minute reads forever.
-- Summaries include today/yesterday, rolling 7-day and rolling 30-day
-  comparisons, best/worst posts, averages, follower growth, and heuristic
-  hashtag/format performance.
+### Main routes
 
-Every reusable object and field is also described in `/openapi.json` under
-`components.schemas`.
+| Route                                        | Who uses it        | What it does                                |
+| -------------------------------------------- | ------------------ | ------------------------------------------- |
+| `GET /healthz`                               | Render             | Simple liveness check                       |
+| `GET /docs`                                  | You                | Interactive API documentation               |
+| `GET /v1/connections`                        | Admin              | List safe connection identity and health    |
+| `GET /v1/analytics/{account}?days=30`        | Admin              | Account history and follower growth         |
+| `GET /v1/posts/{account}?days=30`            | Admin              | Post text, metadata, metrics, and rates     |
+| `GET /v1/posts/{account}/{post_id}`          | Admin              | One post with age-based metric history      |
+| `GET /v1/summary/{account}?days=7`           | Admin              | Period comparisons and content performance  |
+| `GET /actions/openapi.json`                  | Custom GPT editor  | Importable Action schema                    |
+| `GET /actions/x/{friendly-name}?days=30`     | Custom GPT         | Safe analytics for one allow-listed account |
+| `GET /api/chatgpt/{token}/{account}?days=30` | Legacy integration | Safe URL-token analytics endpoint           |
 
-## Running locally
+Admin `/v1` routes require `Authorization: Bearer YOUR_ADMIN_API_KEY`. Action routes require the separate Action key. Both are rate-limited.
+
+### What the analytics response includes
+
+For each account, the safe API can include:
+
+- account ID, handle, display name, followers, following, total posts, and snapshot time
+- post ID, complete text, creation time, canonical URL, reply/quote/repost flags, media type, URLs, hashtags, mentions, and language
+- impressions, likes, replies, reposts, quotes, bookmarks, profile clicks, URL clicks, and total engagements when X supplies them
+- engagement, like, reply, repost, click-through, and profile-visit rates
+- account history, follower growth, best/worst posts, average performance, format performance, and hashtag/topic performance
+- an initial post metric plus the first available metrics at 1 hour, 6 hours, 24 hours, 3 days, 7 days, and 30 days after publishing
+
+`null` means X did not provide that metric. It does not mean zero.
+
+## Run locally
 
 ```bash
+git clone <YOUR_FORK_URL>
+cd project-g-wing
 npm install
 cp .env.example .env
-npm run keygen          # prints an API key and the API_KEY_HASHES value to set
-# edit .env: API_KEY_HASHES, CHATGPT_ACCESS_TOKEN, CREDENTIAL_ENCRYPTION_KEY,
-#            X_CLIENT_ID, X_CLIENT_SECRET, X_OAUTH_REDIRECT_URI
+```
+
+Fill in `.env` using the comments in [`.env.example`](.env.example), then run:
+
+```bash
 npm run dev
 ```
 
-Then:
+Open <http://localhost:3000/docs> to explore the API. Before a production deployment, run:
 
 ```bash
-curl http://localhost:3000/healthz
-curl -H "Authorization: Bearer <the key from keygen>" http://localhost:3000/v1/accounts
+npm run typecheck
+npm test
+npm run build
 ```
 
-Open <http://localhost:3000/docs> for the interactive documentation.
+## Add more accounts later
 
-The service starts with zero accounts so the first account can be added through
-`POST /v1/connections/x`. It refuses to start without an admin API key, the
-ChatGPT URL token, or the credential encryption key.
+No data model change is needed.
 
-```
-Configuration error
+1. Complete the OAuth setup link while signed into the new X account.
+2. Confirm it appears in `GET /v1/connections`.
+3. If the Custom GPT should access it, add a new `friendly-name=handle` pair to `CHATGPT_ACTION_ACCOUNTS` and redeploy.
+4. Re-import `GET /actions/openapi.json` in the GPT editor so it sees the additional action.
 
-No API keys configured, so every request would be rejected. Set API_KEY_HASHES
-(preferred) or API_KEYS. See .env.example.
-```
+## Troubleshooting
 
-### Scripts
+| You see…                             | Usually means                                                                      | What to do                                                                                                          |
+| ------------------------------------ | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `token_refresh_failed`               | X rejected an expired or revoked refresh token                                     | Run the protected OAuth setup link again while signed into that account. Reconnecting preserves history.            |
+| `credits depleted` or X `402`        | Your X developer app’s available credits are exhausted                             | Add X API credits or wait for the applicable allowance. Credits are tied to the developer app, not each connection. |
+| `unauthorized` in `/docs`            | The Authorization header is missing or uses the wrong key                          | Enter `Bearer ` followed by your raw admin API key.                                                                 |
+| GPT Action cannot import             | The app is not deployed yet, the domain is wrong, or the schema URL is unreachable | Open `/actions/openapi.json` in a browser first; it should return JSON.                                             |
+| GPT Action returns `401`             | The Action key in GPT does not match `CHATGPT_ACTION_API_KEY` in Render            | Update the key in the GPT Action Authentication settings.                                                           |
+| OAuth says callback mismatch         | The callback in X and `X_OAUTH_REDIRECT_URI` differ                                | Copy the exact same HTTPS callback URI into both places.                                                            |
+| Connections disappear after a deploy | Durable storage is not configured                                                  | Set `DATABASE_URL` to a Neon pooled connection, then reconnect accounts once.                                       |
 
-| Command             | Purpose                           |
-| ------------------- | --------------------------------- |
-| `npm run dev`       | Watch mode with reload.           |
-| `npm run build`     | Compile TypeScript to `dist/`.    |
-| `npm start`         | Run the compiled server.          |
-| `npm test`          | Run the test suite.               |
-| `npm run typecheck` | Type-check without emitting.      |
-| `npm run lint`      | Check formatting.                 |
-| `npm run format`    | Apply formatting.                 |
-| `npm run keygen`    | Generate an API key and its hash. |
+## Security checklist
 
-## Deploying to Render
-
-`render.yaml` is a Render Blueprint, so the service can be created from this
-repository directly.
-
-1. In Render, choose **New → Blueprint** and point it at this repository.
-2. Render reads `render.yaml` and creates a Node web service with
-   `healthCheckPath: /healthz`.
-3. Set the secrets it marks `sync: false` in the service's **Environment** tab:
-
-   | Variable                    | Value                                                 |
-   | --------------------------- | ----------------------------------------------------- |
-   | `API_KEY_HASHES`            | Output of `npm run keygen` (comma-separate more)      |
-   | `CHATGPT_ACCESS_TOKEN`      | 32+ character URL-safe random token                   |
-   | `CHATGPT_ACTION_API_KEY`    | New 32+ character key used only by the Custom GPT     |
-   | `PUBLIC_API_BASE_URL`       | `https://apx.serionflow.com`                          |
-   | `CREDENTIAL_ENCRYPTION_KEY` | `openssl rand -base64 48` output                      |
-   | `DATABASE_URL`              | Neon **pooled** PostgreSQL connection string          |
-   | `X_CLIENT_ID`               | Shared X OAuth 2.0 developer app client ID            |
-   | `X_CLIENT_SECRET`           | Shared client secret, if the app is confidential      |
-   | `OAUTH_SETUP_TOKEN`         | New 32+ character secret for the one-click OAuth URL  |
-   | `X_OAUTH_REDIRECT_URI`      | `https://project-g-wing.onrender.com/auth/x/callback` |
-
-   Add each account using `POST /v1/oauth/x/authorize`, then open its returned
-   authorization URL while logged into that X account.
-
-4. Create a free Neon project, click **Connect**, select **Pooled connection**,
-   and paste its full connection string into Render as `DATABASE_URL`. Never
-   paste it into ChatGPT or commit it to Git.
-
-5. Deploy. Render assigns an HTTPS URL and terminates TLS at its load balancer;
-   `TRUST_PROXY=true` is already set so the HTTPS check reads
-   `X-Forwarded-Proto` correctly.
-
-Do not set `PORT` — Render provides it.
-
-To deploy without the Blueprint, create a Node web service with build command
-`npm ci && npm run build`, start command `npm start`, health check path
-`/healthz`, and the environment variables from `.env.example`.
-
-## Configuration reference
-
-All configuration is environment variables; see `.env.example` for the annotated
-list.
-
-| Variable                        | Default                   | Purpose                                                         |
-| ------------------------------- | ------------------------- | --------------------------------------------------------------- |
-| `API_KEY_HASHES`                | —                         | SHA-256 hashes of accepted API keys. One is required.           |
-| `API_KEYS`                      | —                         | Plaintext keys, for local use. Min. 24 characters.              |
-| `CHATGPT_ACCESS_TOKEN`          | —                         | Required 32+ character URL token for GET-only ChatGPT API.      |
-| `CHATGPT_RATE_LIMIT_MAX`        | `30`                      | ChatGPT requests per token per rate-limit window.               |
-| `CHATGPT_ACTION_API_KEY`        | —                         | Optional dedicated Bearer key for the narrow Custom GPT Action. |
-| `CHATGPT_ACTION_RATE_LIMIT_MAX` | `30`                      | Custom GPT Action requests per key per rate-limit window.       |
-| `PUBLIC_API_BASE_URL`           | —                         | Public HTTPS base URL placed in the Action OpenAPI schema.      |
-| `X_BEARER_TOKEN`                | —                         | X Bearer token shared by all account slots.                     |
-| `X_ACCOUNT_<n>_USERNAME`        | —                         | Handle to expose in slot `n`.                                   |
-| `X_ACCOUNT_<n>_ID`              | the handle                | Id used in URLs.                                                |
-| `X_ACCOUNT_<n>_LABEL`           | `@handle`                 | Display name.                                                   |
-| `X_ACCOUNT_<n>_BEARER_TOKEN`    | `X_BEARER_TOKEN`          | Per-account token override.                                     |
-| `X_USERNAME`                    | —                         | Shorthand for a single account.                                 |
-| `PORT`                          | `3000`                    | Listen port. Render sets this.                                  |
-| `HOST`                          | `0.0.0.0`                 | Listen address.                                                 |
-| `LOG_LEVEL`                     | `info`                    | Pino log level.                                                 |
-| `REQUIRE_HTTPS`                 | on in production          | Reject plaintext HTTP on `/v1`.                                 |
-| `TRUST_PROXY`                   | `true`                    | Read `X-Forwarded-*`. Required behind a TLS-terminating LB.     |
-| `CORS_ORIGINS`                  | none                      | Browser origins allowed. Empty blocks all.                      |
-| `ENABLE_DOCS`                   | `true`                    | Serve `/docs`.                                                  |
-| `RATE_LIMIT_MAX`                | `60`                      | Requests per key per window.                                    |
-| `RATE_LIMIT_WINDOW_SECONDS`     | `60`                      | Window length.                                                  |
-| `CACHE_TTL_SECONDS`             | `300`                     | How long X data is reused.                                      |
-| `ANALYTICS_TWEET_LIMIT`         | `100`                     | Posts per account in the window (5–100).                        |
-| `SYNC_POST_LIMIT`               | `500`                     | Posts paginated per persistent sync (5–3200).                   |
-| `TOP_TWEETS_COUNT`              | `5`                       | Top posts returned per account.                                 |
-| `X_API_BASE_URL`                | `https://api.x.com/2`     | Upstream base URL.                                              |
-| `X_TIMEOUT_MS`                  | `10000`                   | Upstream request timeout.                                       |
-| `CREDENTIAL_ENCRYPTION_KEY`     | —                         | Required key used to encrypt all account token sets.            |
-| `X_CLIENT_ID`                   | —                         | One shared X developer application client ID.                   |
-| `X_CLIENT_SECRET`               | —                         | Shared confidential-client secret, when applicable.             |
-| `OAUTH_SETUP_TOKEN`             | —                         | 32+ character secret for the browser OAuth start URL.           |
-| `X_OAUTH_REDIRECT_URI`          | —                         | Exact X OAuth callback, ending `/auth/x/callback`.              |
-| `X_OAUTH_SCOPES`                | read-only scopes          | OAuth scopes requested for every account connection.            |
-| `DATABASE_URL`                  | —                         | Production Postgres/Neon URL; state is stored as JSONB.         |
-| `DATA_FILE`                     | `./data/x-analytics.json` | Local-only JSON fallback; not durable on Render Free.           |
-| `SYNC_INTERVAL_SECONDS`         | `900`                     | Background snapshot interval.                                   |
-
-## Security notes
-
-- **API keys are stored hashed.** `API_KEY_HASHES` holds SHA-256 digests, so the
-  running process never has a usable key in memory. Comparison is constant-time
-  across every configured key, with no early exit, so timing does not reveal
-  which key matched or how many exist.
-- **Fail closed.** With no keys configured the process refuses to boot rather
-  than start up unprotected.
-- **HTTPS enforced.** In production a plaintext request to `/v1` is rejected
-  with 403 before the key is even examined, and HSTS is sent. `/healthz` stays
-  reachable over HTTP so a platform health check inside the private network
-  still works.
-- **Secrets never appear in output.** X tokens and internal secret references
-  are never returned. Authorization, cookie, access-token, refresh-token, and
-  client-secret fields are redacted from logs. An
-  upstream rejection is reported as `upstream_unauthorized` without echoing the
-  credential. Tests assert both.
-- **ChatGPT is read-only.** `/api/chatgpt/:token/:account` has one GET route;
-  no POST, PUT, DELETE, connection health, OAuth, or secret data is reachable
-  through it. Its path token is redacted from application logs and error text.
-- **OAuth is account-safe.** The one-time state and PKCE verifier are stored
-  encrypted, expire after ten minutes, and can be used only once. The callback
-  never returns OAuth values; X `/2/users/me` determines the account.
-- **No browser access by default.** `CORS_ORIGINS` is empty, so no web origin
-  can call the API until you name one.
-- **Rate limited per key**, keyed by a hash of the presented key rather than the
-  key itself, falling back to client IP for unauthenticated requests.
-- **Caching protects your X quota.** Concurrent requests for the same account
-  are de-duplicated into a single upstream call, so a chatty agent cannot
-  exhaust your X rate limit.
-- **Read-only by construction.** The X client issues only GET requests and
-  exposes no method that writes.
+- [ ] Use separate values for admin API access, OAuth setup, legacy URL access, and the Custom GPT Action key.
+- [ ] Keep `DATABASE_URL`, `CREDENTIAL_ENCRYPTION_KEY`, X client secret, and X OAuth tokens out of GitHub and chat messages.
+- [ ] Use a private Custom GPT while testing.
+- [ ] Rotate a key immediately if it appears in a screenshot, browser URL, message, or commit.
+- [ ] Keep `X_OAUTH_SCOPES` read-only: `tweet.read users.read offline.access`.
+- [ ] Use a custom domain and HTTPS for production.
 
 ## Project layout
 
-```
+```text
 src/
-  index.ts                  entrypoint: config, wiring, graceful shutdown
-  server.ts                 Fastify app: security plugins, error envelope, routes
-  auth/
-    apiKey.ts               hashed key store, constant-time verification
-    plugin.ts               Bearer + HTTPS guard for /v1
-  config/
-    env.ts                  environment schema and defaults
-    accounts.ts             X_ACCOUNT_<n>_* slot parsing
-  routes/
-    health.ts               unauthenticated index and probe
-    v1.ts                   the authenticated endpoints
-    oauth.ts                public X OAuth callback only
-  services/
-    analyticsService.ts     caching, per-account isolation
-    connectionService.ts    auto-detection, OAuth lifecycle, sync and summaries
-    xOAuthService.ts        PKCE authorization start and callback completion
-  security/
-    credentialVault.ts      AES-256-GCM account credential encryption
-  storage/
-    repository.ts           atomic durable history and connection store
-    types.ts                persistent record definitions
-  openapi/
-    schemas.ts              reusable field-level API documentation
-  x/
-    client.ts               X API v2 client, upstream error mapping
-    analytics.ts            pure metric computation
-    types.ts                X API payload types
-  lib/
-    cache.ts                TTL cache with in-flight de-duplication
-    errors.ts               error types and the response envelope
-tests/                      unit and end-to-end tests over auth, metrics, routes,
-                            encrypted connections and persistent history
+  auth/          API-key verification and HTTPS guards
+  config/        Environment validation and account configuration
+  routes/        Health, admin, OAuth, legacy ChatGPT, and Custom GPT Action routes
+  security/      AES-256-GCM credential vault
+  services/      Account connection, sync, history, summaries, and analytics
+  storage/       PostgreSQL JSONB or local-file persistence
+  x/             Read-only X API v2 client and metric helpers
+tests/           Unit and end-to-end tests
 ```
 
-## Tests
+## Useful links
 
-```bash
-npm test
-```
+- [Interactive API docs](https://apx.serionflow.com/docs)
+- [Live Custom GPT Action schema](https://apx.serionflow.com/actions/openapi.json)
+- [X OAuth 2.0 documentation](https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code)
+- [Render documentation](https://render.com/docs)
+- [Neon documentation](https://neon.com/docs)
+- [OpenAI Custom GPT Actions guide](https://help.openai.com/en/articles/9442513)
 
-The suite covers metric computation against fixture data (including empty
-windows, missing metrics and partial impression coverage), account and
-environment parsing, API key verification, and the HTTP surface end to end —
-auth rejection, HTTPS enforcement, caching, rate limiting, per-account failure
-isolation, and every upstream error path. The X API is stubbed at the `fetch`
-boundary, so the real client and error mapping are exercised and no test
-touches the network.
+---
+
+Built for learning from real performance over time — not guessing what might work.

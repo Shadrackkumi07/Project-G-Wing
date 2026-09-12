@@ -11,6 +11,7 @@ import { ConnectionService } from "../src/services/connectionService.js";
 import { XOAuthService } from "../src/services/xOAuthService.js";
 import { Repository } from "../src/storage/repository.js";
 import { XClient, type FetchLike } from "../src/x/client.js";
+import { parseActionAccounts } from "../src/routes/actions.js";
 import { sampleTweets, sampleUser } from "./fixtures/xApi.js";
 
 const KEY = "test-key-that-is-long-enough-123";
@@ -115,6 +116,14 @@ async function fixture(
 }
 
 describe("persistent X connections", () => {
+  it("allows Custom GPT Action aliases to be configured without source changes", () => {
+    expect(parseActionAccounts("brand=brand_handle,founder=1234567890")).toEqual({
+      brand: "brand_handle",
+      founder: "1234567890",
+    });
+    expect(() => parseActionAccounts("not a valid mapping")).toThrow(/CHATGPT_ACTION_ACCOUNTS/);
+  });
+
   it("detects the authenticated account, encrypts credentials, and never returns them", async () => {
     const { app, path } = await fixture();
     const response = await app.inject({
