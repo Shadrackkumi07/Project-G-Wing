@@ -1,0 +1,48 @@
+services:
+  - type: web
+    name: x-analytics-api
+    runtime: node
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+
+      # Render terminates TLS at its load balancer, so the protocol and client
+      # IP arrive in X-Forwarded-* headers.
+      - key: TRUST_PROXY
+        value: "true"
+      - key: ENABLE_DOCS
+        value: "true"
+
+      - key: RATE_LIMIT_MAX
+        value: "60"
+      - key: RATE_LIMIT_WINDOW_SECONDS
+        value: "60"
+      - key: CACHE_TTL_SECONDS
+        value: "300"
+      - key: ANALYTICS_TWEET_LIMIT
+        value: "100"
+      - key: TOP_TWEETS_COUNT
+        value: "5"
+
+      # Secrets: sync:false keeps them out of this file. Set each one in the
+      # Render dashboard under the service's Environment tab.
+      - key: API_KEY_HASHES
+        sync: false
+      - key: X_BEARER_TOKEN
+        sync: false
+
+      # Accounts to expose. Add X_ACCOUNT_2_*, X_ACCOUNT_3_* and so on in the
+      # dashboard for further handles.
+      - key: X_ACCOUNT_1_USERNAME
+        sync: false
+      - key: X_ACCOUNT_1_ID
+        sync: false
+      - key: X_ACCOUNT_1_LABEL
+        sync: false
