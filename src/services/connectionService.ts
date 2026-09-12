@@ -125,9 +125,10 @@ export class ConnectionService {
       (item) => item.x_account_id === user.id,
     );
     if (duplicate) {
-      throw new ApiError(409, "duplicate_connection", `@${user.username} is already connected.`, {
-        connection_id: duplicate.id,
-      });
+      // OAuth reconnection is deliberately idempotent. X has already told us
+      // that these fresh credentials belong to this exact account, so replace
+      // only the encrypted credential payload and retain all existing history.
+      return this.replaceCredentials(duplicate.id, input);
     }
     const now = this.now().toISOString();
     const secretReference = await this.vault.store({

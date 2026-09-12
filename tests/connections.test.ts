@@ -132,7 +132,7 @@ describe("persistent X connections", () => {
     await app.close();
   });
 
-  it("rejects duplicate accounts and write scopes", async () => {
+  it("replaces credentials for an already-connected account and rejects write scopes", async () => {
     const { app } = await fixture();
     const add = () =>
       app.inject({
@@ -141,8 +141,11 @@ describe("persistent X connections", () => {
         headers: AUTH,
         payload: { access_token: "token", scope: "tweet.read" },
       });
-    expect((await add()).statusCode).toBe(201);
-    expect((await add()).statusCode).toBe(409);
+    const first = await add();
+    const reconnected = await add();
+    expect(first.statusCode).toBe(201);
+    expect(reconnected.statusCode).toBe(201);
+    expect(reconnected.json().id).toBe(first.json().id);
     const write = await app.inject({
       method: "POST",
       url: "/v1/connections/x",

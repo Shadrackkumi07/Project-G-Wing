@@ -294,10 +294,11 @@ curl -X POST https://your-service.example/v1/connections/x \
   }'
 ```
 
-The service immediately calls X `/users/me`, rejects invalid or duplicate
-connections, saves the detected immutable X account ID, encrypts both tokens,
-and performs the first sync. Repeat this request for every account—no source
-code or manual handle mapping is needed.
+The service immediately calls X `/users/me`, rejects invalid credentials,
+saves the detected immutable X account ID, encrypts both tokens, and performs
+the first sync. Re-authorizing an already-connected X account securely replaces
+its saved credentials while preserving its analytics history. Repeat this
+request for every account—no source code or manual handle mapping is needed.
 
 ### Historical field guide
 
