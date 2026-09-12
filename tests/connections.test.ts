@@ -69,6 +69,7 @@ async function fixture(options: { chatGptRateLimitMax?: number } = {}) {
       : {}),
   });
   const repository = new Repository(path);
+  await repository.initialize();
   const client = new XClient({
     baseUrl: env.X_API_BASE_URL,
     timeoutMs: env.X_TIMEOUT_MS,
@@ -181,7 +182,9 @@ describe("persistent X connections", () => {
       url: `/v1/posts/${sampleUser.id}/101`,
       headers: AUTH,
     });
-    expect(detail.json().metric_history).toHaveLength(2);
+    // Age milestone sampling prevents every 15-minute sync from storing a
+    // duplicate metric for an already-mature post.
+    expect(detail.json().metric_history).toHaveLength(1);
     expect(detail.json().milestone_snapshots["1h"]).not.toBeNull();
 
     const summary = await app.inject({
@@ -191,8 +194,10 @@ describe("persistent X connections", () => {
     });
     expect(summary.json()).toHaveProperty("comparisons.last_30_days_vs_previous_30");
     expect(summary.json()).toHaveProperty("topic_performance.#build");
-    expect(new Repository(path).postMetrics(sampleUser.id, "101")).toHaveLength(2);
-    expect(repository.listConnections()).toHaveLength(1);
+    const reloaded = new Repository(path);
+    await reloaded.initialize();
+    expect(await reloaded.postMetrics(sampleUser.id, "101")).toHaveLength(1);
+    expect(await repository.listConnections()).toHaveLength(1);
     await app.close();
   });
 

@@ -22,7 +22,7 @@ export class CredentialVault {
     this.key = createHash("sha256").update(masterKey, "utf8").digest();
   }
 
-  store<T>(credentials: T, existingId?: string): string {
+  async store<T>(credentials: T, existingId?: string): Promise<string> {
     const now = new Date().toISOString();
     const id = existingId ?? `secret_${randomUUID()}`;
     const iv = randomBytes(12);
@@ -31,20 +31,21 @@ export class CredentialVault {
       cipher.update(JSON.stringify(credentials), "utf8"),
       cipher.final(),
     ]);
-    this.repository.saveSecret({
+    const existing = await this.repository.getSecret(id);
+    await this.repository.saveSecret({
       id,
       algorithm: "aes-256-gcm",
       iv: iv.toString("base64"),
       auth_tag: cipher.getAuthTag().toString("base64"),
       ciphertext: ciphertext.toString("base64"),
-      created_at: this.repository.getSecret(id)?.created_at ?? now,
+      created_at: existing?.created_at ?? now,
       updated_at: now,
     });
     return id;
   }
 
-  read<T = XCredentials>(id: string): T {
-    const secret = this.repository.getSecret(id);
+  async read<T = XCredentials>(id: string): Promise<T> {
+    const secret = await this.repository.getSecret(id);
     if (!secret) throw new ConfigError(`Credential secret ${id} does not exist.`);
     const decipher = createDecipheriv("aes-256-gcm", this.key, Buffer.from(secret.iv, "base64"));
     decipher.setAuthTag(Buffer.from(secret.auth_tag, "base64"));

@@ -108,12 +108,12 @@ export class ConnectionService {
     private readonly now: () => Date = () => new Date(),
   ) {}
 
-  list(): SafeConnection[] {
-    return this.repository.listConnections().map(safe);
+  async list(): Promise<SafeConnection[]> {
+    return (await this.repository.listConnections()).map(safe);
   }
 
-  get(id: string): SafeConnection {
-    const record = this.repository.getConnection(id);
+  async get(id: string): Promise<SafeConnection> {
+    const record = await this.repository.getConnection(id);
     if (!record) throw notFound(`No connection with id "${id}".`);
     return safe(record);
   }
@@ -121,16 +121,16 @@ export class ConnectionService {
   async create(input: NewConnectionInput): Promise<SafeConnection> {
     this.validateInput(input);
     const user = await this.client.getAuthenticatedUser(input.access_token);
-    const duplicate = this.repository
-      .listConnections()
-      .find((item) => item.x_account_id === user.id);
+    const duplicate = (await this.repository.listConnections()).find(
+      (item) => item.x_account_id === user.id,
+    );
     if (duplicate) {
       throw new ApiError(409, "duplicate_connection", `@${user.username} is already connected.`, {
         connection_id: duplicate.id,
       });
     }
     const now = this.now().toISOString();
-    const secretReference = this.vault.store({
+    const secretReference = await this.vault.store({
       access_token: input.access_token,
       refresh_token: input.refresh_token,
       token_type: input.token_type,
@@ -151,7 +151,7 @@ export class ConnectionService {
       created_at: now,
       updated_at: now,
     };
-    this.repository.saveConnection(record);
+    await this.repository.saveConnection(record);
     await this.sync(record.id, user);
     return this.get(record.id);
   }
@@ -170,7 +170,7 @@ export class ConnectionService {
 
   async replaceCredentials(id: string, input: NewConnectionInput): Promise<SafeConnection> {
     this.validateInput(input);
-    const record = this.require(id);
+    const record = await this.require(id);
     const user = await this.client.getAuthenticatedUser(input.access_token);
     if (user.id !== record.x_account_id) {
       throw new ApiError(
@@ -179,7 +179,7 @@ export class ConnectionService {
         `These credentials belong to @${user.username}, not @${record.username}.`,
       );
     }
-    this.vault.store(
+    await this.vault.store(
       {
         access_token: input.access_token,
         refresh_token: input.refresh_token,
@@ -192,16 +192,16 @@ export class ConnectionService {
     record.connection_status = "connected";
     record.last_error = null;
     record.updated_at = this.now().toISOString();
-    this.repository.saveConnection(record);
+    await this.repository.saveConnection(record);
     await this.sync(id, user);
     return this.get(id);
   }
 
   async test(id: string): Promise<SafeConnection> {
-    const record = this.require(id);
+    const record = await this.require(id);
     try {
       const user = await this.client.getAuthenticatedUser(
-        this.vault.read(record.credential_secret_reference).access_token,
+        (await this.vault.read(record.credential_secret_reference)).access_token,
       );
       if (user.id !== record.x_account_id) {
         throw new ApiError(
@@ -222,16 +222,16 @@ export class ConnectionService {
       record.connection_status = "disconnected";
       record.last_error = error instanceof Error ? error.message : "Credential validation failed.";
       record.updated_at = this.now().toISOString();
-      this.repository.saveConnection(record);
+      await this.repository.saveConnection(record);
       throw error;
     }
-    this.repository.saveConnection(record);
+    await this.repository.saveConnection(record);
     return safe(record);
   }
 
   async refresh(id: string): Promise<SafeConnection> {
-    const record = this.require(id);
-    const credentials = this.vault.read(record.credential_secret_reference);
+    const record = await this.require(id);
+    const credentials = await this.vault.read(record.credential_secret_reference);
     if (!credentials.refresh_token || !this.env.X_CLIENT_ID) {
       throw new ApiError(
         400,
@@ -250,35 +250,38 @@ export class ConnectionService {
       token_type: refreshed.token_type,
       scope: refreshed.scope,
     };
-    this.vault.store(next, record.credential_secret_reference);
+    await this.vault.store(next, record.credential_secret_reference);
     record.token_expires_at = refreshed.expires_in
       ? new Date(this.now().getTime() + refreshed.expires_in * 1000).toISOString()
       : null;
     record.connection_status = "connected";
     record.last_error = null;
     record.updated_at = this.now().toISOString();
-    this.repository.saveConnection(record);
+    await this.repository.saveConnection(record);
     return this.test(id);
   }
 
-  delete(id: string): void {
-    if (!this.repository.deleteConnection(id)) throw notFound(`No connection with id "${id}".`);
+  async delete(id: string): Promise<void> {
+    if (!(await this.repository.deleteConnection(id))) {
+      throw notFound(`No connection with id "${id}".`);
+    }
   }
 
-  private require(account: string): ConnectionRecord {
+  private async require(account: string): Promise<ConnectionRecord> {
     const record =
-      this.repository.getConnection(account) ?? this.repository.findConnectionByAccountId(account);
+      (await this.repository.getConnection(account)) ??
+      (await this.repository.findConnectionByAccountId(account));
     if (!record) throw notFound(`No X account or connection matching "${account}".`);
     return record;
   }
 
   private async credentials(record: ConnectionRecord): Promise<XCredentials> {
     if (record.token_expires_at && Date.parse(record.token_expires_at) <= this.now().getTime()) {
-      const credentials = this.vault.read(record.credential_secret_reference);
+      const credentials = await this.vault.read(record.credential_secret_reference);
       if (!credentials.refresh_token) {
         record.connection_status = "expired";
         record.last_error = "Access token expired and no refresh token is available.";
-        this.repository.saveConnection(record);
+        await this.repository.saveConnection(record);
         throw new ApiError(502, "upstream_unauthorized", record.last_error);
       }
       await this.refresh(record.id);
@@ -291,7 +294,7 @@ export class ConnectionService {
     knownUser?: XUser,
     refreshAttempted = false,
   ): Promise<SafeConnection> {
-    const record = this.require(account);
+    const record = await this.require(account);
     try {
       const credentials = await this.credentials(record);
       const user = knownUser ?? (await this.client.getAuthenticatedUser(credentials.access_token));
@@ -300,7 +303,7 @@ export class ConnectionService {
       const { tweets, media } = await this.client.getUserTweets(user.id, credentials.access_token, {
         maxResults: this.env.SYNC_POST_LIMIT,
       });
-      this.persistSnapshot(record, user, tweets, media);
+      await this.persistSnapshot(record, user, tweets, media);
       Object.assign(record, {
         username: user.username,
         display_name: user.name,
@@ -310,7 +313,7 @@ export class ConnectionService {
         last_error: null,
         updated_at: this.now().toISOString(),
       });
-      this.repository.saveConnection(record);
+      await this.repository.saveConnection(record);
       return safe(record);
     } catch (error) {
       if (
@@ -318,7 +321,7 @@ export class ConnectionService {
         error instanceof ApiError &&
         error.code === "upstream_unauthorized"
       ) {
-        const credentials = this.vault.read(record.credential_secret_reference);
+        const credentials = await this.vault.read(record.credential_secret_reference);
         if (credentials.refresh_token && this.env.X_CLIENT_ID) {
           await this.refresh(record.id);
           return this.sync(record.id, undefined, true);
@@ -330,17 +333,17 @@ export class ConnectionService {
           : "error";
       record.last_error = error instanceof Error ? error.message : "Sync failed.";
       record.updated_at = this.now().toISOString();
-      this.repository.saveConnection(record);
+      await this.repository.saveConnection(record);
       throw error;
     }
   }
 
-  private persistSnapshot(
+  private async persistSnapshot(
     record: ConnectionRecord,
     user: XUser,
     tweets: XTweet[],
     media: XMedia[],
-  ): void {
+  ): Promise<void> {
     const capturedAt = this.now().toISOString();
     const mediaByKey = new Map(media.map((item) => [item.media_key, item.type]));
     const posts: PostRecord[] = tweets.map((tweet) => {
@@ -393,7 +396,7 @@ export class ConnectionService {
       total_posts: user.public_metrics?.tweet_count ?? null,
       listed: user.public_metrics?.listed_count ?? null,
     };
-    this.repository.saveSnapshot(account, posts, metrics);
+    await this.repository.saveSnapshot(account, posts, metrics);
   }
 
   private async ensureFresh(record: ConnectionRecord): Promise<void> {
@@ -404,16 +407,16 @@ export class ConnectionService {
   }
 
   async accountAnalytics(account: string, days = 30) {
-    const record = this.require(account);
+    const record = await this.require(account);
     await this.ensureFresh(record);
     const since = this.now().getTime() - days * DAY;
-    const history = this.repository
-      .accountSnapshots(record.x_account_id)
-      .filter((item) => Date.parse(item.captured_at) >= since);
+    const history = (await this.repository.accountSnapshots(record.x_account_id)).filter(
+      (item) => Date.parse(item.captured_at) >= since,
+    );
     const current = history.at(-1) ?? null;
     const previous = history.length > 1 ? history[0]! : null;
     return {
-      account: safe(this.require(record.id)),
+      account: safe(await this.require(record.id)),
       current,
       follower_growth:
         current && previous && current.followers !== null && previous.followers !== null
@@ -425,47 +428,52 @@ export class ConnectionService {
   }
 
   async posts(account: string, days = 30) {
-    const record = this.require(account);
+    const record = await this.require(account);
     await this.ensureFresh(record);
     const since = this.now().getTime() - days * DAY;
-    const posts = this.repository
-      .posts(record.x_account_id)
-      .filter((post) => !post.created_at || Date.parse(post.created_at) >= since);
-    const allLatest = posts
-      .map((post) => this.repository.postMetrics(record.x_account_id, post.post_id).at(-1))
-      .filter((item): item is PostMetricRecord => Boolean(item));
+    const posts = (await this.repository.posts(record.x_account_id)).filter(
+      (post) => !post.created_at || Date.parse(post.created_at) >= since,
+    );
+    const latestMetricPromises = posts.map(async (post) =>
+      (await this.repository.postMetrics(record.x_account_id, post.post_id)).at(-1),
+    );
+    const allLatest = (await Promise.all(latestMetricPromises)).filter(
+      (item): item is PostMetricRecord => Boolean(item),
+    );
     const recentAverage = allLatest.length
       ? allLatest.reduce((sum, item) => sum + (item.total_engagements ?? 0), 0) / allLatest.length
       : null;
     return {
-      account: safe(this.require(record.id)),
+      account: safe(await this.require(record.id)),
       days,
       count: posts.length,
-      posts: posts.map((post) => {
-        const metric =
-          this.repository.postMetrics(record.x_account_id, post.post_id).at(-1) ?? null;
-        return {
-          ...post,
-          metrics: metric ? { ...metric, ...rates(metric) } : null,
-          performance_relative_to_recent_average:
-            metric?.total_engagements !== null &&
-            metric?.total_engagements !== undefined &&
-            recentAverage &&
-            recentAverage > 0
-              ? round(metric.total_engagements / recentAverage)
-              : null,
-        };
-      }),
+      posts: await Promise.all(
+        posts.map(async (post) => {
+          const metric =
+            (await this.repository.postMetrics(record.x_account_id, post.post_id)).at(-1) ?? null;
+          return {
+            ...post,
+            metrics: metric ? { ...metric, ...rates(metric) } : null,
+            performance_relative_to_recent_average:
+              metric?.total_engagements !== null &&
+              metric?.total_engagements !== undefined &&
+              recentAverage &&
+              recentAverage > 0
+                ? round(metric.total_engagements / recentAverage)
+                : null,
+          };
+        }),
+      ),
       generated_at: this.now().toISOString(),
     };
   }
 
   async post(account: string, postId: string) {
-    const record = this.require(account);
+    const record = await this.require(account);
     await this.ensureFresh(record);
-    const post = this.repository.post(record.x_account_id, postId);
+    const post = await this.repository.post(record.x_account_id, postId);
     if (!post) throw notFound(`Post ${postId} was not found for @${record.username}.`);
-    const history = this.repository.postMetrics(record.x_account_id, postId);
+    const history = await this.repository.postMetrics(record.x_account_id, postId);
     const milestones = Object.fromEntries(
       MILESTONES.map((target, index) => {
         const candidates = history.filter((item) => item.age_seconds !== null);
@@ -478,7 +486,7 @@ export class ConnectionService {
     );
     const latest = history.at(-1) ?? null;
     return {
-      account: safe(this.require(record.id)),
+      account: safe(await this.require(record.id)),
       post,
       metrics: latest ? { ...latest, ...rates(latest) } : null,
       metric_history: history,
@@ -530,7 +538,7 @@ export class ConnectionService {
         item.average_engagements = item.posts ? round(item.total_engagements / item.posts) : 0;
       return output;
     };
-    const accountHistory = this.repository.accountSnapshots(payload.account.x_account_id);
+    const accountHistory = await this.repository.accountSnapshots(payload.account.x_account_id);
     const latestFollowers = accountHistory.at(-1)?.followers ?? null;
     const baseline =
       accountHistory.filter((item) => Date.parse(item.captured_at) <= now - days * DAY).at(-1)

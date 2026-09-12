@@ -2,7 +2,7 @@ services:
   - type: web
     name: x-analytics-api
     runtime: node
-    plan: starter
+    plan: free
     buildCommand: npm ci && npm run build
     startCommand: npm start
     healthCheckPath: /healthz
@@ -34,8 +34,6 @@ services:
         value: "5"
       - key: SYNC_POST_LIMIT
         value: "500"
-      - key: DATA_FILE
-        value: /var/data/x-analytics.json
       - key: SYNC_INTERVAL_SECONDS
         value: "900"
 
@@ -47,6 +45,8 @@ services:
         sync: false
       - key: CREDENTIAL_ENCRYPTION_KEY
         sync: false
+      - key: DATABASE_URL
+        sync: false
       - key: X_CLIENT_ID
         sync: false
       - key: X_CLIENT_SECRET
@@ -55,7 +55,3 @@ services:
         sync: false
       - key: X_OAUTH_REDIRECT_URI
         sync: false
-    disk:
-      name: analytics-data
-      mountPath: /var/data
-      sizeGB: 1

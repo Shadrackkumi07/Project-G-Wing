@@ -48,7 +48,7 @@ export const oauthRoutes: FastifyPluginAsync<OAuthRouteOptions> = async (
         },
       },
       async (_request, reply) => {
-        const { authorization_url: authorizationUrl } = oauthService.begin();
+        const { authorization_url: authorizationUrl } = await oauthService.begin();
         return reply.header("Cache-Control", "no-store").redirect(authorizationUrl);
       },
     );

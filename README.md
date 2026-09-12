@@ -11,8 +11,9 @@ account as an independent encrypted connection.
   fields are redacted from logs.
 - **Identity is automatic.** Adding credentials calls X `/users/me`; the X
   account ID, handle, name, and profile image are detected rather than typed.
-- **History is durable.** Account and post snapshots remain in `DATA_FILE`
-  across restarts. The Render blueprint attaches a persistent disk.
+- **History is durable.** In production, encrypted account state and analytics
+  snapshots are stored in PostgreSQL JSONB via `DATABASE_URL`, so Render Free
+  restarts and deploys do not erase them.
 - **Accounts never mix.** Every post and snapshot is keyed by X's immutable
   account ID, and replacement credentials must resolve to that same ID.
 - **Two protected surfaces.** Admin routes require an `Authorization` API key;
@@ -308,15 +309,16 @@ code or manual handle mapping is needed.
 - Stored posts preserve full `text`, `created_at`, canonical `url`, language,
   original/reply/quote/repost flags, media types, URL presence and expanded
   URLs, hashtags, mentions, conversation ID, and sensitivity flag.
-- Every metric snapshot contains its capture time and post age plus
+- Every retained metric snapshot contains its capture time and post age plus
   impressions, likes, replies, reposts, quotes, bookmarks, profile clicks, URL
   clicks, and total engagements. Unavailable X metrics are `null`, never a
   fabricated zero.
 - Derived post metrics include engagement, like, reply, repost, click-through,
   and profile-visit rates, plus performance relative to the account's recent
   average.
-- Post detail selects the first stored snapshot at or after 1 hour, 6 hours, 24
-  hours, 3 days, 7 days, and 30 days. All raw snapshots remain available too.
+- Post detail retains an initial snapshot plus the first snapshot at or after 1
+  hour, 6 hours, 24 hours, 3 days, 7 days, and 30 days. This keeps the required
+  age comparisons without storing duplicate 15-minute reads forever.
 - Summaries include today/yesterday, rolling 7-day and rolling 30-day
   comparisons, best/worst posts, averages, follower growth, and heuristic
   hashtag/format performance.
@@ -383,6 +385,7 @@ repository directly.
    | `API_KEY_HASHES`            | Output of `npm run keygen` (comma-separate more)      |
    | `CHATGPT_ACCESS_TOKEN`      | 32+ character URL-safe random token                   |
    | `CREDENTIAL_ENCRYPTION_KEY` | `openssl rand -base64 48` output                      |
+   | `DATABASE_URL`              | Neon **pooled** PostgreSQL connection string          |
    | `X_CLIENT_ID`               | Shared X OAuth 2.0 developer app client ID            |
    | `X_CLIENT_SECRET`           | Shared client secret, if the app is confidential      |
    | `OAUTH_SETUP_TOKEN`         | New 32+ character secret for the one-click OAuth URL  |
@@ -391,7 +394,11 @@ repository directly.
    Add each account using `POST /v1/oauth/x/authorize`, then open its returned
    authorization URL while logged into that X account.
 
-4. Deploy. Render assigns an HTTPS URL and terminates TLS at its load balancer;
+4. Create a free Neon project, click **Connect**, select **Pooled connection**,
+   and paste its full connection string into Render as `DATABASE_URL`. Never
+   paste it into ChatGPT or commit it to Git.
+
+5. Deploy. Render assigns an HTTPS URL and terminates TLS at its load balancer;
    `TRUST_PROXY=true` is already set so the HTTPS check reads
    `X-Forwarded-Proto` correctly.
 
@@ -439,7 +446,8 @@ list.
 | `OAUTH_SETUP_TOKEN`          | —                         | 32+ character secret for the browser OAuth start URL.       |
 | `X_OAUTH_REDIRECT_URI`       | —                         | Exact X OAuth callback, ending `/auth/x/callback`.          |
 | `X_OAUTH_SCOPES`             | read-only scopes          | OAuth scopes requested for every account connection.        |
-| `DATA_FILE`                  | `./data/x-analytics.json` | Durable encrypted connection and analytics store.           |
+| `DATABASE_URL`               | —                         | Production Postgres/Neon URL; state is stored as JSONB.     |
+| `DATA_FILE`                  | `./data/x-analytics.json` | Local-only JSON fallback; not durable on Render Free.       |
 | `SYNC_INTERVAL_SECONDS`      | `900`                     | Background snapshot interval.                               |
 
 ## Security notes

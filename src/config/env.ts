@@ -35,6 +35,8 @@ const envSchema = z.object({
   ANALYTICS_TWEET_LIMIT: z.coerce.number().int().min(5).max(100).default(100),
   SYNC_POST_LIMIT: z.coerce.number().int().min(5).max(3200).default(500),
   TOP_TWEETS_COUNT: z.coerce.number().int().min(1).max(50).default(5),
+  // When configured, durable PostgreSQL JSONB storage replaces DATA_FILE.
+  DATABASE_URL: z.string().url().optional(),
   DATA_FILE: z.string().min(1).default("./data/x-analytics.json"),
   CREDENTIAL_ENCRYPTION_KEY: z.string().min(32).optional(),
   X_CLIENT_ID: z.string().optional(),

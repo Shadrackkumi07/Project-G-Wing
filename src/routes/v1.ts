@@ -138,7 +138,7 @@ export const v1Routes: FastifyPluginAsync<V1RouteOptions> = async (
       accounts: connectionService
         ? [
             ...service.listAccounts(),
-            ...connectionService.list().map((item) => ({
+            ...(await connectionService.list()).map((item) => ({
               id: item.id,
               label: item.display_name,
               username: item.username,
@@ -275,7 +275,7 @@ export const v1Routes: FastifyPluginAsync<V1RouteOptions> = async (
           security: [{ bearerAuth: [] }],
         },
       },
-      async () => ({ connections: connectionService.list() }),
+      async () => ({ connections: await connectionService.list() }),
     );
 
     app.get<{ Params: ConnectionParams }>(
@@ -354,7 +354,7 @@ export const v1Routes: FastifyPluginAsync<V1RouteOptions> = async (
         },
       },
       async (request, reply) => {
-        connectionService.delete(request.params.id);
+        await connectionService.delete(request.params.id);
         return reply.status(204).send();
       },
     );

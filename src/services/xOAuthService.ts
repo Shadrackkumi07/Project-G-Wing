@@ -30,7 +30,7 @@ export class XOAuthService {
     private readonly now: () => Date = () => new Date(),
   ) {}
 
-  begin(): { authorization_url: string; expires_at: string } {
+  async begin(): Promise<{ authorization_url: string; expires_at: string }> {
     if (!this.env.X_CLIENT_ID || !this.env.X_OAUTH_REDIRECT_URI) {
       throw new ApiError(
         503,
@@ -41,8 +41,8 @@ export class XOAuthService {
     const state = base64Url(randomBytes(32));
     const verifier = base64Url(randomBytes(64));
     const expiresAt = new Date(this.now().getTime() + STATE_TTL_MS).toISOString();
-    const verifierSecret = this.vault.store({ verifier });
-    this.repository.saveOAuthState({
+    const verifierSecret = await this.vault.store({ verifier });
+    await this.repository.saveOAuthState({
       state,
       verifier_secret_reference: verifierSecret,
       expires_at: expiresAt,
@@ -75,17 +75,19 @@ export class XOAuthService {
         "OAuth callback is missing its code or state.",
       );
     }
-    const pending = this.repository.takeOAuthState(input.state);
+    const pending = await this.repository.takeOAuthState(input.state);
     if (!pending || Date.parse(pending.expires_at) <= this.now().getTime()) {
-      if (pending) this.repository.deleteSecret(pending.verifier_secret_reference);
+      if (pending) await this.repository.deleteSecret(pending.verifier_secret_reference);
       throw new ApiError(
         400,
         "oauth_state_invalid",
         "OAuth state is invalid or expired. Start again.",
       );
     }
-    const { verifier } = this.vault.read<{ verifier: string }>(pending.verifier_secret_reference);
-    this.repository.deleteSecret(pending.verifier_secret_reference);
+    const { verifier } = await this.vault.read<{ verifier: string }>(
+      pending.verifier_secret_reference,
+    );
+    await this.repository.deleteSecret(pending.verifier_secret_reference);
     const tokens = await this.client.exchangeAuthorizationCode({
       code: input.code,
       codeVerifier: verifier,

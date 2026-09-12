@@ -44,7 +44,8 @@ async function main(): Promise<void> {
     env,
   });
 
-  const repository = new Repository(env.DATA_FILE);
+  const repository = new Repository({ dataFile: env.DATA_FILE, databaseUrl: env.DATABASE_URL });
+  await repository.initialize();
   const vault = new CredentialVault(repository, env.CREDENTIAL_ENCRYPTION_KEY);
   const connectionService = new ConnectionService(repository, vault, client, env);
   const oauthService = new XOAuthService(repository, vault, client, connectionService, env);
@@ -61,11 +62,16 @@ async function main(): Promise<void> {
 
   // Periodic snapshots make age-based comparisons possible without requiring a caller.
   const syncTimer = setInterval(() => {
-    for (const connection of connectionService.list()) {
-      void connectionService.sync(connection.id).catch((error: unknown) => {
-        app.log.warn({ connection_id: connection.id, err: error }, "Scheduled X sync failed");
-      });
-    }
+    void connectionService
+      .list()
+      .then((connections) => {
+        for (const connection of connections) {
+          void connectionService.sync(connection.id).catch((error: unknown) => {
+            app.log.warn({ connection_id: connection.id, err: error }, "Scheduled X sync failed");
+          });
+        }
+      })
+      .catch((error: unknown) => app.log.warn({ err: error }, "Could not list scheduled X syncs"));
   }, env.SYNC_INTERVAL_SECONDS * 1000);
   syncTimer.unref();
 
@@ -73,9 +79,10 @@ async function main(): Promise<void> {
     {
       accounts: [
         ...accounts.map((account) => ({ id: account.id, username: account.username })),
-        ...connectionService
-          .list()
-          .map((connection) => ({ id: connection.id, username: connection.username })),
+        ...(await connectionService.list()).map((connection) => ({
+          id: connection.id,
+          username: connection.username,
+        })),
       ],
       api_keys_configured: apiKeyStore.size,
       require_https: env.REQUIRE_HTTPS,
@@ -97,6 +104,7 @@ async function main(): Promise<void> {
       app.log.info({ signal }, "Shutting down");
       app
         .close()
+        .then(() => repository.close())
         .then(() => process.exit(0))
         .catch((error) => {
           app.log.error({ err: error }, "Error during shutdown");
