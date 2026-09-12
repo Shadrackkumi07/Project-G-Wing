@@ -414,4 +414,50 @@ describe("rate limiting", () => {
     expect(limited.json().error.code).toBe("rate_limited");
     await app.close();
   });
+
+  it("does not let a rotating unrecognised token mint a fresh allowance", async () => {
+    const { app } = await buildTestApp({
+      env: { RATE_LIMIT_MAX: "2", RATE_LIMIT_WINDOW_SECONDS: "60" },
+    });
+
+    // A different invalid key each time: all must share one IP-based bucket,
+    // otherwise an unauthenticated client could brute-force keys unchecked.
+    const call = (attempt: number) =>
+      app.inject({
+        method: "GET",
+        url: "/v1/accounts",
+        headers: { authorization: `Bearer wrong-key-number-${attempt}-padded` },
+      });
+
+    expect((await call(1)).statusCode).toBe(401);
+    expect((await call(2)).statusCode).toBe(401);
+
+    const limited = await call(3);
+    expect(limited.statusCode).toBe(429);
+    expect(limited.json().error.code).toBe("rate_limited");
+    await app.close();
+  });
+
+  it("keeps a valid key's allowance separate from unauthenticated traffic", async () => {
+    const { app } = await buildTestApp({
+      env: { RATE_LIMIT_MAX: "2", RATE_LIMIT_WINDOW_SECONDS: "60" },
+    });
+
+    // Exhaust the IP bucket with bad keys...
+    await app.inject({
+      method: "GET",
+      url: "/v1/accounts",
+      headers: { authorization: "Bearer bad-key-long-enough-to-parse" },
+    });
+    await app.inject({
+      method: "GET",
+      url: "/v1/accounts",
+      headers: { authorization: "Bearer bad-key-long-enough-to-parse" },
+    });
+
+    // ...the real key still has its own.
+    const response = await app.inject({ method: "GET", url: "/v1/accounts", headers: AUTH });
+    expect(response.statusCode).toBe(200);
+    await app.close();
+  });
 });

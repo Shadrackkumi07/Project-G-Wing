@@ -190,6 +190,10 @@ export function buildAccountAnalytics({
 
   let impressionTotal = 0;
   let tweetsWithImpressions = 0;
+  // Tracked separately so a partially-covered window divides engagements by the
+  // impressions of the same posts, rather than the whole window's engagements
+  // by a subset's impressions.
+  let engagementsWithImpressions = 0;
 
   const byHour: Record<string, number> = {};
   const byWeekday: Record<string, number> = {};
@@ -223,6 +227,7 @@ export function buildAccountAnalytics({
     if (metrics.impressions !== null) {
       impressionTotal += metrics.impressions;
       tweetsWithImpressions += 1;
+      engagementsWithImpressions += metrics.engagements;
     }
 
     composition[kind].count += 1;
@@ -345,7 +350,7 @@ export function buildAccountAnalytics({
       totals,
       averages_per_tweet: averages,
       engagement_rate_per_impression:
-        tweetsWithImpressions > 0 ? ratio(totals.engagements, impressionTotal) : null,
+        tweetsWithImpressions > 0 ? ratio(engagementsWithImpressions, impressionTotal) : null,
       // With nothing analysed, a rate of 0 would read as "no engagement"
       // rather than "no data", so it is reported as unknown instead.
       engagement_rate_per_follower: analyzed > 0 ? ratio(averages.engagements, followers) : null,

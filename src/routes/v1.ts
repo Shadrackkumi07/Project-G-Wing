@@ -4,6 +4,7 @@ import type { AnalyticsService } from "../services/analyticsService.js";
 export interface V1RouteOptions {
   service: AnalyticsService;
   authHook: onRequestHookHandler;
+  rateLimitHook: onRequestHookHandler;
 }
 
 const accountParams = {
@@ -28,7 +29,13 @@ interface AccountParams {
  * whenever the analytics shape grows. The OpenAPI document describes them in
  * prose instead.
  */
-export const v1Routes: FastifyPluginAsync<V1RouteOptions> = async (app, { service, authHook }) => {
+export const v1Routes: FastifyPluginAsync<V1RouteOptions> = async (
+  app,
+  { service, authHook, rateLimitHook },
+) => {
+  // Order matters: rate limiting must precede authentication, or an
+  // unauthenticated caller could retry keys without ever being throttled.
+  app.addHook("onRequest", rateLimitHook);
   app.addHook("onRequest", authHook);
 
   app.get(

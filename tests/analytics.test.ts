@@ -129,6 +129,9 @@ describe("buildAccountAnalytics", () => {
     const { engagement, notes } = build(partial);
     expect(engagement.totals.impressions).toBe(500);
     expect(notes.join(" ")).toContain("cover only 1 of 4");
+    // The rate must divide that post's 120 engagements by its own 500
+    // impressions, not the window's 206 engagements by the same 500.
+    expect(engagement.engagement_rate_per_impression).toBe(0.24);
   });
 
   it("breaks the window down by post kind", () => {

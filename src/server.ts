@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
@@ -21,11 +20,17 @@ export interface BuildServerOptions {
   service: AnalyticsService;
 }
 
-function rateLimitKey(authorization: string | undefined, ip: string): string {
+function rateLimitKey(store: ApiKeyStore, authorization: string | undefined, ip: string): string {
   const presented = extractBearerToken(authorization);
   if (!presented) return `ip:${ip}`;
-  // Bucket per API key without holding the key itself in the limiter's store.
-  return `key:${createHash("sha256").update(presented).digest("hex").slice(0, 16)}`;
+
+  // Only a recognised key earns its own bucket — and `keyId` is a digest
+  // prefix, so the key itself never enters the limiter's store. An unknown
+  // token falls back to the caller's IP: bucketing by the presented value
+  // would let a client rotate random tokens to mint a fresh allowance per
+  // request and brute-force keys unchecked.
+  const keyId = store.verify(presented);
+  return keyId ? `key:${keyId}` : `ip:${ip}`;
 }
 
 export async function buildServer({
@@ -75,10 +80,15 @@ export async function buildServer({
     maxAge: 600,
   });
 
-  await app.register(rateLimit, {
+  // global:false so the limiter is not attached per route, where it would run
+  // *after* the /v1 scope's authentication hook and therefore never see a
+  // rejected request. The hook is placed explicitly ahead of auth instead.
+  await app.register(rateLimit, { global: false });
+
+  const rateLimitHook = app.rateLimit({
     max: env.RATE_LIMIT_MAX,
     timeWindow: env.RATE_LIMIT_WINDOW_SECONDS * 1000,
-    keyGenerator: (request) => rateLimitKey(request.headers.authorization, request.ip),
+    keyGenerator: (request) => rateLimitKey(apiKeyStore, request.headers.authorization, request.ip),
     // The plugin throws this value verbatim, so it must be a real ApiError for
     // the error handler below to recognise it and keep the response envelope
     // consistent with every other error.
@@ -170,7 +180,7 @@ export async function buildServer({
   });
 
   await app.register(healthRoutes, { service });
-  await app.register(v1Routes, { service, authHook, prefix: "/v1" });
+  await app.register(v1Routes, { service, authHook, rateLimitHook, prefix: "/v1" });
 
   return app;
 }
