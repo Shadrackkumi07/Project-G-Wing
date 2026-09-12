@@ -18,6 +18,8 @@ const envSchema = z.object({
 
   API_KEYS: z.string().optional(),
   API_KEY_HASHES: z.string().optional(),
+  CHATGPT_ACCESS_TOKEN: z.string().min(32).optional(),
+  CHATGPT_RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(30),
 
   REQUIRE_HTTPS: booleanish.optional(),
   TRUST_PROXY: booleanish.default(true),
@@ -31,7 +33,13 @@ const envSchema = z.object({
   X_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60_000).default(10_000),
   CACHE_TTL_SECONDS: z.coerce.number().int().min(0).max(86_400).default(300),
   ANALYTICS_TWEET_LIMIT: z.coerce.number().int().min(5).max(100).default(100),
+  SYNC_POST_LIMIT: z.coerce.number().int().min(5).max(3200).default(500),
   TOP_TWEETS_COUNT: z.coerce.number().int().min(1).max(50).default(5),
+  DATA_FILE: z.string().min(1).default("./data/x-analytics.json"),
+  CREDENTIAL_ENCRYPTION_KEY: z.string().min(32).optional(),
+  X_CLIENT_ID: z.string().optional(),
+  X_CLIENT_SECRET: z.string().optional(),
+  SYNC_INTERVAL_SECONDS: z.coerce.number().int().min(60).max(86_400).default(900),
 });
 
 export type Env = z.infer<typeof envSchema> & { REQUIRE_HTTPS: boolean };

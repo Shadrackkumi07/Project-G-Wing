@@ -9,6 +9,10 @@ export type ErrorCode =
   | "upstream_rate_limited"
   | "upstream_unavailable"
   | "upstream_error"
+  | "duplicate_connection"
+  | "account_mismatch"
+  | "refresh_unavailable"
+  | "token_refresh_failed"
   | "internal_error";
 
 export class ApiError extends Error {

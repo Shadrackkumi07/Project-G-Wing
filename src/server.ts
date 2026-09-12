@@ -1,4 +1,9 @@
-import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
+import Fastify, {
+  type FastifyError,
+  type FastifyInstance,
+  type FastifyRequest,
+  type onRequestHookHandler,
+} from "fastify";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
@@ -8,16 +13,21 @@ import swaggerUi from "@fastify/swagger-ui";
 import type { Env } from "./config/env.js";
 import type { ApiKeyStore } from "./auth/apiKey.js";
 import { extractBearerToken } from "./auth/apiKey.js";
-import { createAuthHook } from "./auth/plugin.js";
+import { createAuthHook, createChatGptTokenHook, tokenFromChatGptPath } from "./auth/plugin.js";
 import { ApiError } from "./lib/errors.js";
 import { healthRoutes } from "./routes/health.js";
 import { v1Routes } from "./routes/v1.js";
 import type { AnalyticsService } from "./services/analyticsService.js";
+import type { ConnectionService } from "./services/connectionService.js";
+import { openApiSchemas } from "./openapi/schemas.js";
+import { chatGptRoutes } from "./routes/chatgpt.js";
 
 export interface BuildServerOptions {
   env: Env;
   apiKeyStore: ApiKeyStore;
   service: AnalyticsService;
+  connectionService?: ConnectionService;
+  chatGptTokenStore?: ApiKeyStore;
 }
 
 function rateLimitKey(store: ApiKeyStore, authorization: string | undefined, ip: string): string {
@@ -33,10 +43,22 @@ function rateLimitKey(store: ApiKeyStore, authorization: string | undefined, ip:
   return keyId ? `key:${keyId}` : `ip:${ip}`;
 }
 
+function chatGptRateLimitKey(store: ApiKeyStore, url: string, ip: string): string {
+  const token = tokenFromChatGptPath(url);
+  const tokenId = token ? store.verify(token) : null;
+  return tokenId ? `chatgpt:${tokenId}` : `ip:${ip}`;
+}
+
+function redactChatGptUrl(url: string | undefined): string | undefined {
+  return url?.replace(/(\/api\/chatgpt\/)[^/?#]+/, "$1[redacted]");
+}
+
 export async function buildServer({
   env,
   apiKeyStore,
   service,
+  connectionService,
+  chatGptTokenStore,
 }: BuildServerOptions): Promise<FastifyInstance> {
   const app = Fastify({
     trustProxy: env.TRUST_PROXY,
@@ -44,8 +66,25 @@ export async function buildServer({
     logger: {
       level: env.NODE_ENV === "test" ? "silent" : env.LOG_LEVEL,
       redact: {
-        paths: ["req.headers.authorization", "req.headers.cookie"],
+        paths: [
+          "req.headers.authorization",
+          "req.headers.cookie",
+          "req.body.access_token",
+          "req.body.refresh_token",
+          "req.body.client_secret",
+        ],
         censor: "[redacted]",
+      },
+      serializers: {
+        req(request: FastifyRequest) {
+          const host = request.headers.host;
+          return {
+            method: request.method,
+            url: redactChatGptUrl(request.url),
+            host: Array.isArray(host) ? host[0] : host,
+            remoteAddress: request.ip,
+          };
+        },
       },
     },
   });
@@ -85,7 +124,7 @@ export async function buildServer({
   // rejected request. The hook is placed explicitly ahead of auth instead.
   await app.register(rateLimit, { global: false });
 
-  const rateLimitHook = app.rateLimit({
+  const rateLimitHook: onRequestHookHandler = app.rateLimit({
     max: env.RATE_LIMIT_MAX,
     timeWindow: env.RATE_LIMIT_WINDOW_SECONDS * 1000,
     keyGenerator: (request) => rateLimitKey(apiKeyStore, request.headers.authorization, request.ip),
@@ -99,18 +138,39 @@ export async function buildServer({
         `Rate limit exceeded: at most ${context.max} requests per ${env.RATE_LIMIT_WINDOW_SECONDS}s.`,
         { retry_after_seconds: Math.ceil(context.ttl / 1000) },
       ),
-  });
+  }) as onRequestHookHandler;
+
+  const chatGptRateLimitHook: onRequestHookHandler | undefined = chatGptTokenStore
+    ? (app.rateLimit({
+        max: env.CHATGPT_RATE_LIMIT_MAX,
+        timeWindow: env.RATE_LIMIT_WINDOW_SECONDS * 1000,
+        keyGenerator: (request) => chatGptRateLimitKey(chatGptTokenStore, request.url, request.ip),
+        errorResponseBuilder: (_request, context) =>
+          new ApiError(
+            429,
+            "rate_limited",
+            `ChatGPT rate limit exceeded: at most ${context.max} requests per ${env.RATE_LIMIT_WINDOW_SECONDS}s.`,
+            { retry_after_seconds: Math.ceil(context.ttl / 1000) },
+          ),
+      }) as onRequestHookHandler)
+    : undefined;
 
   await app.register(swagger, {
+    refResolver: {
+      buildLocalReference(json, _baseUri, _fragment, index) {
+        return typeof json.$id === "string" ? json.$id : `def-${index}`;
+      },
+    },
     openapi: {
       openapi: "3.1.0",
       info: {
         title: "X Analytics API",
         version: "1.0.0",
         description:
-          "Read-only analytics for a fixed set of X (Twitter) accounts, intended for AI agents " +
-          "and humans. X API credentials live only in this service's environment and are never " +
-          "accepted from, or returned to, callers.",
+          "Persistent read-only analytics for independently authorized X accounts, intended " +
+          "for AI agents and humans. Per-account OAuth credentials are accepted only by the " +
+          "authenticated admin connection routes, encrypted at rest, redacted from logs, and " +
+          "never returned.",
       },
       components: {
         securitySchemes: {
@@ -125,9 +185,16 @@ export async function buildServer({
         { name: "meta", description: "Service metadata and health." },
         { name: "accounts", description: "Which X accounts are exposed." },
         { name: "analytics", description: "Per-account analytics." },
+        { name: "connections", description: "Administrative X OAuth connection lifecycle." },
+        { name: "history", description: "Persistent account and post performance history." },
+        { name: "chatgpt", description: "GET-only, sanitized analytics access via URL token." },
       ],
     },
   });
+
+  // Register after Swagger so shared schemas are included in /openapi.json,
+  // and before routes so response references resolve for serialization.
+  for (const schema of openApiSchemas) app.addSchema(schema);
 
   if (env.ENABLE_DOCS) {
     await app.register(swaggerUi, {
@@ -169,7 +236,7 @@ export async function buildServer({
     reply.status(404).send({
       error: {
         code: "not_found",
-        message: `No route for ${request.method} ${request.url}. See GET / for the endpoint list.`,
+        message: `No route for ${request.method} ${redactChatGptUrl(request.url)}. See GET / for the endpoint list.`,
       },
     });
   });
@@ -180,7 +247,24 @@ export async function buildServer({
   });
 
   await app.register(healthRoutes, { service });
-  await app.register(v1Routes, { service, authHook, rateLimitHook, prefix: "/v1" });
+  await app.register(v1Routes, {
+    service,
+    connectionService,
+    authHook,
+    rateLimitHook,
+    prefix: "/v1",
+  });
+  if (connectionService && chatGptTokenStore && chatGptRateLimitHook) {
+    await app.register(chatGptRoutes, {
+      connectionService,
+      authHook: createChatGptTokenHook({
+        store: chatGptTokenStore,
+        requireHttps: env.REQUIRE_HTTPS,
+      }),
+      rateLimitHook: chatGptRateLimitHook,
+      prefix: "/api/chatgpt",
+    });
+  }
 
   return app;
 }

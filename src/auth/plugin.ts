@@ -15,6 +15,30 @@ export interface AuthHookOptions {
   requireHttps: boolean;
 }
 
+/** Extracts the secret from /api/chatgpt/:accessToken/:account without logging it. */
+export function tokenFromChatGptPath(url: string): string | null {
+  const match = /^\/api\/chatgpt\/([^/?#]+)\//.exec(url);
+  if (!match?.[1]) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+}
+
+export function createChatGptTokenHook({
+  store,
+  requireHttps,
+}: AuthHookOptions): onRequestHookHandler {
+  return async function authenticateChatGpt(request) {
+    if (requireHttps && request.protocol !== "https") throw httpsRequired();
+    const presented = tokenFromChatGptPath(request.url);
+    if (!presented || !store.verify(presented)) {
+      throw unauthorized("A valid read-only ChatGPT URL token is required.");
+    }
+  };
+}
+
 /**
  * Guards a route with `Authorization: Bearer <api-key>` and, in production,
  * with a transport check so a key can never be accepted over plaintext HTTP.

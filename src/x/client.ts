@@ -1,5 +1,5 @@
 import { ApiError, notFound } from "../lib/errors.js";
-import type { XTweet, XTweetsPage, XUser } from "./types.js";
+import type { XMedia, XTweet, XTweetsPage, XUser } from "./types.js";
 
 const USER_FIELDS = [
   "created_at",
@@ -13,9 +13,19 @@ const USER_FIELDS = [
   "verified_type",
 ].join(",");
 
-const TWEET_FIELDS = ["created_at", "lang", "public_metrics", "referenced_tweets", "text"].join(
-  ",",
-);
+const TWEET_FIELDS = [
+  "attachments",
+  "conversation_id",
+  "created_at",
+  "entities",
+  "lang",
+  "non_public_metrics",
+  "organic_metrics",
+  "possibly_sensitive",
+  "public_metrics",
+  "referenced_tweets",
+  "text",
+].join(",");
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -25,17 +35,32 @@ export interface XClientOptions {
   fetchImpl?: FetchLike;
 }
 
-interface XErrorBody {
-  title?: string;
-  detail?: string;
-  errors?: Array<{ message?: string; detail?: string; title?: string }>;
+export interface TokenRefreshResult {
+  access_token: string;
+  refresh_token?: string;
+  expires_in?: number;
+  scope?: string;
+  token_type?: string;
 }
 
 function describeUpstreamError(status: number, body: unknown): string {
-  const parsed = (body ?? {}) as XErrorBody;
+  const parsed = (body ?? {}) as {
+    title?: string;
+    detail?: string;
+    errors?: Array<{ message?: string; detail?: string; title?: string }>;
+  };
   const first = parsed.errors?.[0];
   const detail = parsed.detail ?? first?.detail ?? first?.message ?? parsed.title ?? first?.title;
-  return detail ? `X API responded ${status}: ${detail}` : `X API responded ${status}.`;
+  // Useful provider messages are retained, but anything that even resembles
+  // credential material is discarded rather than risk reflecting a secret.
+  const safeDetail =
+    detail &&
+    !/(access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|authorization|bearer|api[_ -]?key)/i.test(
+      detail,
+    )
+      ? detail.slice(0, 300)
+      : undefined;
+  return safeDetail ? `X API responded ${status}: ${safeDetail}` : `X API responded ${status}.`;
 }
 
 export class XClient {
@@ -62,22 +87,79 @@ export class XClient {
     return body.data;
   }
 
+  async getAuthenticatedUser(bearerToken: string): Promise<XUser> {
+    const body = await this.request<{ data?: XUser }>(
+      "/users/me",
+      { "user.fields": USER_FIELDS },
+      bearerToken,
+    );
+    if (!body.data) throw new ApiError(502, "upstream_error", "X did not identify a user.");
+    return body.data;
+  }
+
   async getUserTweets(
     userId: string,
     bearerToken: string,
-    options: { maxResults: number },
+    options: { maxResults: number; startTime?: string; endTime?: string },
   ): Promise<XTweetsPage> {
-    const body = await this.request<{ data?: XTweet[]; meta?: { result_count?: number } }>(
-      `/users/${encodeURIComponent(userId)}/tweets`,
-      {
-        max_results: String(options.maxResults),
+    const tweets: XTweet[] = [];
+    const media = new Map<string, XMedia>();
+    let paginationToken: string | undefined;
+    do {
+      const remaining = options.maxResults - tweets.length;
+      const query: Record<string, string> = {
+        max_results: String(Math.min(Math.max(remaining, 5), 100)),
         "tweet.fields": TWEET_FIELDS,
-      },
-      bearerToken,
-    );
+        expansions: "attachments.media_keys",
+        "media.fields": "media_key,type",
+      };
+      if (options.startTime) query.start_time = options.startTime;
+      if (options.endTime) query.end_time = options.endTime;
+      if (paginationToken) query.pagination_token = paginationToken;
+      const body = await this.request<{
+        data?: XTweet[];
+        includes?: { media?: XMedia[] };
+        meta?: { result_count?: number; next_token?: string };
+      }>(`/users/${encodeURIComponent(userId)}/tweets`, query, bearerToken);
+      tweets.push(...(body.data ?? []));
+      for (const item of body.includes?.media ?? []) media.set(item.media_key, item);
+      paginationToken = body.meta?.next_token;
+    } while (paginationToken && tweets.length < options.maxResults);
+    return {
+      tweets: tweets.slice(0, options.maxResults),
+      resultCount: tweets.length,
+      media: [...media.values()],
+    };
+  }
 
-    const tweets = body.data ?? [];
-    return { tweets, resultCount: body.meta?.result_count ?? tweets.length };
+  async refreshAccessToken(input: {
+    refreshToken: string;
+    clientId: string;
+    clientSecret?: string;
+  }): Promise<TokenRefreshResult> {
+    const url = new URL(`${this.baseUrl}/oauth2/token`);
+    const headers: Record<string, string> = {
+      accept: "application/json",
+      "content-type": "application/x-www-form-urlencoded",
+    };
+    if (input.clientSecret) {
+      headers.authorization = `Basic ${Buffer.from(`${input.clientId}:${input.clientSecret}`).toString("base64")}`;
+    }
+    const response = await this.fetchImpl(url.toString(), {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: input.refreshToken,
+        client_id: input.clientId,
+      }),
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    const body = (await response.json().catch(() => undefined)) as TokenRefreshResult | undefined;
+    if (!response.ok || !body?.access_token) {
+      throw new ApiError(502, "token_refresh_failed", "X rejected the token refresh request.");
+    }
+    return body;
   }
 
   private async request<T>(
@@ -90,26 +172,37 @@ export class XClient {
       url.searchParams.set(key, value);
     }
 
-    let response: Response;
-    try {
-      response = await this.fetchImpl(url.toString(), {
-        method: "GET",
-        headers: {
-          authorization: `Bearer ${bearerToken}`,
-          accept: "application/json",
-        },
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-    } catch (cause) {
-      const timedOut = cause instanceof Error && cause.name === "TimeoutError";
-      throw new ApiError(
-        504,
-        "upstream_unavailable",
-        timedOut
-          ? `The X API did not respond within ${this.timeoutMs}ms.`
-          : "Could not reach the X API.",
-      );
+    let response: Response | undefined;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        response = await this.fetchImpl(url.toString(), {
+          method: "GET",
+          headers: {
+            authorization: `Bearer ${bearerToken}`,
+            accept: "application/json",
+          },
+          signal: AbortSignal.timeout(this.timeoutMs),
+        });
+        // Retry transient server failures. A 429 is intentionally not retried:
+        // its reset timestamp must be honored by the caller/scheduler.
+        if (![500, 502, 503, 504].includes(response.status) || attempt === 2) break;
+        await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** attempt));
+      } catch (cause) {
+        if (attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** attempt));
+          continue;
+        }
+        const timedOut = cause instanceof Error && cause.name === "TimeoutError";
+        throw new ApiError(
+          504,
+          "upstream_unavailable",
+          timedOut
+            ? `The X API did not respond within ${this.timeoutMs}ms.`
+            : "Could not reach the X API.",
+        );
+      }
     }
+    if (!response) throw new ApiError(504, "upstream_unavailable", "Could not reach the X API.");
 
     const payload = await response.json().catch(() => undefined);
 

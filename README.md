@@ -1,55 +1,91 @@
 # Project G Wing
 
-A small, read-only HTTP API that exposes analytics for a fixed set of X (Twitter)
-accounts, designed to be called by an AI agent or a human.
+A persistent, read-only X analytics API designed for ChatGPT and other agents.
+It keeps one shared X developer integration while storing each authorized X
+account as an independent encrypted connection.
 
 - **Read-only.** Nothing in this service can post, delete, follow, or change
   anything on X. It only reads.
-- **Credentials stay server-side.** Your X API Bearer token lives in this
-  service's environment. Callers never send it and never receive it.
-- **Each account reported separately.** Every configured handle gets its own
-  entry with its own numbers and its own status.
-- **One key to call it.** Callers authenticate with
-  `Authorization: Bearer <api-key>` over HTTPS.
+- **Credentials stay server-side.** Per-account OAuth tokens are AES-256-GCM
+  encrypted at rest and are never returned. Request headers and credential body
+  fields are redacted from logs.
+- **Identity is automatic.** Adding credentials calls X `/users/me`; the X
+  account ID, handle, name, and profile image are detected rather than typed.
+- **History is durable.** Account and post snapshots remain in `DATA_FILE`
+  across restarts. The Render blueprint attaches a persistent disk.
+- **Accounts never mix.** Every post and snapshot is keyed by X's immutable
+  account ID, and replacement credentials must resolve to that same ID.
+- **Two protected surfaces.** Admin routes require an `Authorization` API key;
+  ChatGPT receives a separate URL token with GET-only access.
 
-## How the two credentials relate
+## Credential architecture
 
-There are two different secrets, and they never mix:
+There are three different credential roles, and they never mix:
 
 ```
-                   Authorization: Bearer <API key>          X_BEARER_TOKEN
-                   (issued by you, to callers)              (issued by X, to you)
-                              │                                    │
-   ┌──────────────┐           ▼           ┌──────────────┐         ▼      ┌─────────┐
-   │  AI agent /  │ ────── HTTPS ───────► │  This API    │ ─── HTTPS ───► │  X API  │
-   │    human     │ ◄──── analytics ───── │              │ ◄── raw data ─ │   v2    │
-   └──────────────┘                       └──────────────┘                └─────────┘
+Admin ── API_KEY ──► this API ── account OAuth token ──► X API
+ChatGPT ── URL token ──► sanitized read-only analytics
+                              │
+                              ├── one shared X_CLIENT_ID / X_CLIENT_SECRET
+                              └── encrypted token per detected X account
 ```
 
-A caller proves who it is with an **API key you issue**. This service then talks
-to X with **your X credentials**, which the caller never sees. Both hops are
-HTTPS, and on the `/v1` endpoints a plaintext HTTP request is rejected outright
-in production, so an API key cannot be sent in the clear.
+A caller proves who it is with an API key you issue. `POST /v1/connections/x`
+is an admin operation using that same protection. Use only read scopes:
+`tweet.read users.read offline.access`; submitted write scopes are rejected.
+
+ChatGPT has no access to `/v1`. Its only route is
+`GET /api/chatgpt/{token}/{account}?days=30`; it returns safe analytics,
+posts, and 7/30-day summaries only. URL tokens are redacted from application
+logs and error messages.
 
 ## Endpoints
 
-| Method | Path                                 | Auth | Description                                                |
-| ------ | ------------------------------------ | ---- | ---------------------------------------------------------- |
-| `GET`  | `/`                                  | No   | Index of available endpoints.                              |
-| `GET`  | `/healthz`                           | No   | Liveness probe.                                            |
-| `GET`  | `/openapi.json`                      | No   | OpenAPI 3.1 specification.                                 |
-| `GET`  | `/docs`                              | No   | Interactive documentation.                                 |
-| `GET`  | `/v1/accounts`                       | Yes  | Configured accounts: id, label, handle.                    |
-| `GET`  | `/v1/accounts/{accountId}`           | Yes  | Profile and audience snapshot for one account.             |
-| `GET`  | `/v1/accounts/{accountId}/analytics` | Yes  | Full analytics for one account.                            |
-| `GET`  | `/v1/accounts/{accountId}/tweets`    | Yes  | The posts behind the window, with per-post metrics.        |
-| `GET`  | `/v1/analytics`                      | Yes  | Full analytics for **every** account, reported separately. |
+| Method   | Path                                 | Auth | Description                                                  |
+| -------- | ------------------------------------ | ---- | ------------------------------------------------------------ |
+| `GET`    | `/`                                  | No   | Index of available endpoints.                                |
+| `GET`    | `/healthz`                           | No   | Liveness probe.                                              |
+| `GET`    | `/openapi.json`                      | No   | OpenAPI 3.1 specification.                                   |
+| `GET`    | `/docs`                              | No   | Interactive documentation.                                   |
+| `GET`    | `/api/chatgpt/{token}/{account}`     | URL  | Sanitized, rate-limited GET-only ChatGPT analytics.          |
+| `GET`    | `/v1/accounts`                       | Yes  | Legacy and connected accounts, independently identified.     |
+| `GET`    | `/v1/accounts/{accountId}`           | Yes  | Profile and audience snapshot for one account.               |
+| `GET`    | `/v1/accounts/{accountId}/analytics` | Yes  | Full analytics for one account.                              |
+| `GET`    | `/v1/accounts/{accountId}/tweets`    | Yes  | The posts behind the window, with per-post metrics.          |
+| `GET`    | `/v1/analytics`                      | Yes  | Full analytics for **every** account, reported separately.   |
+| `POST`   | `/v1/connections/x`                  | Yes  | Validate a user token, detect its account, encrypt it, sync. |
+| `GET`    | `/v1/connections`                    | Yes  | Connection identities and health; never credentials.         |
+| `GET`    | `/v1/connections/{id}`               | Yes  | One safe connection record.                                  |
+| `PUT`    | `/v1/connections/{id}`               | Yes  | Replace credentials after same-account validation.           |
+| `POST`   | `/v1/connections/{id}/test`          | Yes  | Revalidate identity and health.                              |
+| `POST`   | `/v1/connections/{id}/refresh`       | Yes  | Refresh OAuth credentials.                                   |
+| `POST`   | `/v1/connections/{id}/sync`          | Yes  | Immediately capture a durable analytics snapshot.            |
+| `DELETE` | `/v1/connections/{id}`               | Yes  | Remove connection and encrypted secret.                      |
+| `GET`    | `/v1/analytics/{account}?days=30`    | Yes  | Account history and follower growth.                         |
+| `GET`    | `/v1/posts/{account}?days=30`        | Yes  | Posts, current metrics, rates, and relative performance.     |
+| `GET`    | `/v1/posts/{account}/{post_id}`      | Yes  | Full post and all age/milestone snapshots.                   |
+| `GET`    | `/v1/summary/{account}?days=7`       | Yes  | Comparisons, averages, best/worst, topics, and formats.      |
 
-The `{accountId}` is the id you assign to a handle (`X_ACCOUNT_1_ID`), not the
-handle itself — so a rename on X does not change your URLs.
+For connected accounts, `{account}` accepts the connection ID, immutable X
+account ID, or current handle. Prefer the X account ID so handle changes never
+change URLs. Legacy environment slots remain supported for compatibility.
 
 An agent can discover everything from `GET /` and `GET /openapi.json` without
 being told the shape in advance.
+
+### ChatGPT URL
+
+Generate the URL token once and set it as `CHATGPT_ACCESS_TOKEN` on Render:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+```
+
+Then provide ChatGPT only this URL—not your admin API key or any X token:
+
+```text
+https://your-service.onrender.com/api/chatgpt/CHATGPT_ACCESS_TOKEN/123456789?days=30
+```
 
 ### Example
 
@@ -199,20 +235,53 @@ Every error uses the same envelope:
 `GET /v1/analytics` is the exception: one broken account must not hide the
 others, so it returns 200 and marks that account `"status": "error"` inline.
 
-## Getting your X credentials
+## Connecting X accounts
 
-1. Go to <https://developer.x.com> and create a project and an app.
-2. In the app's **Keys and tokens**, generate the **Bearer Token** (OAuth 2.0
-   App-Only). Read-only access is enough — this service never writes.
-3. Set it as `X_BEARER_TOKEN`.
+Create one X developer application and set its client ID/secret once. Obtain a
+read-only user-context authorization for each account, then submit each token:
 
-An app-only Bearer token can read any public account, so one token covers all
-your handles. If a handle belongs to a different X app, give that slot its own
-`X_ACCOUNT_<n>_BEARER_TOKEN`.
+```bash
+curl -X POST https://your-service.example/v1/connections/x \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "access_token": "...",
+    "refresh_token": "...",
+    "token_expires_at": "2026-09-12T17:00:00Z",
+    "scope": "tweet.read users.read offline.access"
+  }'
+```
 
-To get impression counts, that slot's token must be a **user-context** OAuth 2.0
-access token for that specific account, with the `tweet.read` and `users.read`
-scopes.
+The service immediately calls X `/users/me`, rejects invalid or duplicate
+connections, saves the detected immutable X account ID, encrypts both tokens,
+and performs the first sync. Repeat this request for every account—no source
+code or manual handle mapping is needed.
+
+### Historical field guide
+
+- Connection records contain `id`, `platform`, `x_account_id`, `username`,
+  `display_name`, `profile_image_url`, `connection_status`, `token_expires_at`,
+  `last_synced_at`, `last_error`, `created_at`, and `updated_at`.
+- Account snapshots contain `captured_at`, `followers`, `following`,
+  `total_posts`, and `listed`.
+- Stored posts preserve full `text`, `created_at`, canonical `url`, language,
+  original/reply/quote/repost flags, media types, URL presence and expanded
+  URLs, hashtags, mentions, conversation ID, and sensitivity flag.
+- Every metric snapshot contains its capture time and post age plus
+  impressions, likes, replies, reposts, quotes, bookmarks, profile clicks, URL
+  clicks, and total engagements. Unavailable X metrics are `null`, never a
+  fabricated zero.
+- Derived post metrics include engagement, like, reply, repost, click-through,
+  and profile-visit rates, plus performance relative to the account's recent
+  average.
+- Post detail selects the first stored snapshot at or after 1 hour, 6 hours, 24
+  hours, 3 days, 7 days, and 30 days. All raw snapshots remain available too.
+- Summaries include today/yesterday, rolling 7-day and rolling 30-day
+  comparisons, best/worst posts, averages, follower growth, and heuristic
+  hashtag/format performance.
+
+Every reusable object and field is also described in `/openapi.json` under
+`components.schemas`.
 
 ## Running locally
 
@@ -220,7 +289,7 @@ scopes.
 npm install
 cp .env.example .env
 npm run keygen          # prints an API key and the API_KEY_HASHES value to set
-# edit .env: API_KEY_HASHES, X_BEARER_TOKEN, X_ACCOUNT_1_USERNAME
+# edit .env: API_KEY_HASHES, CHATGPT_ACCESS_TOKEN, CREDENTIAL_ENCRYPTION_KEY, X_CLIENT_ID
 npm run dev
 ```
 
@@ -233,8 +302,9 @@ curl -H "Authorization: Bearer <the key from keygen>" http://localhost:3000/v1/a
 
 Open <http://localhost:3000/docs> for the interactive documentation.
 
-The service refuses to start if no API keys or no X accounts are configured,
-rather than starting up and rejecting every request:
+The service starts with zero accounts so the first account can be added through
+`POST /v1/connections/x`. It refuses to start without an admin API key, the
+ChatGPT URL token, or the credential encryption key.
 
 ```
 Configuration error
@@ -266,15 +336,15 @@ repository directly.
    `healthCheckPath: /healthz`.
 3. Set the secrets it marks `sync: false` in the service's **Environment** tab:
 
-   | Variable               | Value                                            |
-   | ---------------------- | ------------------------------------------------ |
-   | `API_KEY_HASHES`       | Output of `npm run keygen` (comma-separate more) |
-   | `X_BEARER_TOKEN`       | Your X app's Bearer token                        |
-   | `X_ACCOUNT_1_USERNAME` | The handle to expose                             |
-   | `X_ACCOUNT_1_ID`       | e.g. `main`                                      |
-   | `X_ACCOUNT_1_LABEL`    | e.g. `Personal`                                  |
+   | Variable                    | Value                                            |
+   | --------------------------- | ------------------------------------------------ |
+   | `API_KEY_HASHES`            | Output of `npm run keygen` (comma-separate more) |
+   | `CHATGPT_ACCESS_TOKEN`      | 32+ character URL-safe random token              |
+   | `CREDENTIAL_ENCRYPTION_KEY` | `openssl rand -base64 48` output                 |
+   | `X_CLIENT_ID`               | Shared X OAuth 2.0 developer app client ID       |
+   | `X_CLIENT_SECRET`           | Shared client secret, if the app is confidential |
 
-   Add `X_ACCOUNT_2_USERNAME`, `X_ACCOUNT_2_ID`, … for further handles.
+   Add accounts at runtime through `POST /v1/connections/x`.
 
 4. Deploy. Render assigns an HTTPS URL and terminates TLS at its load balancer;
    `TRUST_PROXY=true` is already set so the HTTPS check reads
@@ -291,30 +361,38 @@ To deploy without the Blueprint, create a Node web service with build command
 All configuration is environment variables; see `.env.example` for the annotated
 list.
 
-| Variable                     | Default               | Purpose                                                     |
-| ---------------------------- | --------------------- | ----------------------------------------------------------- |
-| `API_KEY_HASHES`             | —                     | SHA-256 hashes of accepted API keys. One is required.       |
-| `API_KEYS`                   | —                     | Plaintext keys, for local use. Min. 24 characters.          |
-| `X_BEARER_TOKEN`             | —                     | X Bearer token shared by all account slots.                 |
-| `X_ACCOUNT_<n>_USERNAME`     | —                     | Handle to expose in slot `n`.                               |
-| `X_ACCOUNT_<n>_ID`           | the handle            | Id used in URLs.                                            |
-| `X_ACCOUNT_<n>_LABEL`        | `@handle`             | Display name.                                               |
-| `X_ACCOUNT_<n>_BEARER_TOKEN` | `X_BEARER_TOKEN`      | Per-account token override.                                 |
-| `X_USERNAME`                 | —                     | Shorthand for a single account.                             |
-| `PORT`                       | `3000`                | Listen port. Render sets this.                              |
-| `HOST`                       | `0.0.0.0`             | Listen address.                                             |
-| `LOG_LEVEL`                  | `info`                | Pino log level.                                             |
-| `REQUIRE_HTTPS`              | on in production      | Reject plaintext HTTP on `/v1`.                             |
-| `TRUST_PROXY`                | `true`                | Read `X-Forwarded-*`. Required behind a TLS-terminating LB. |
-| `CORS_ORIGINS`               | none                  | Browser origins allowed. Empty blocks all.                  |
-| `ENABLE_DOCS`                | `true`                | Serve `/docs`.                                              |
-| `RATE_LIMIT_MAX`             | `60`                  | Requests per key per window.                                |
-| `RATE_LIMIT_WINDOW_SECONDS`  | `60`                  | Window length.                                              |
-| `CACHE_TTL_SECONDS`          | `300`                 | How long X data is reused.                                  |
-| `ANALYTICS_TWEET_LIMIT`      | `100`                 | Posts per account in the window (5–100).                    |
-| `TOP_TWEETS_COUNT`           | `5`                   | Top posts returned per account.                             |
-| `X_API_BASE_URL`             | `https://api.x.com/2` | Upstream base URL.                                          |
-| `X_TIMEOUT_MS`               | `10000`               | Upstream request timeout.                                   |
+| Variable                     | Default                   | Purpose                                                     |
+| ---------------------------- | ------------------------- | ----------------------------------------------------------- |
+| `API_KEY_HASHES`             | —                         | SHA-256 hashes of accepted API keys. One is required.       |
+| `API_KEYS`                   | —                         | Plaintext keys, for local use. Min. 24 characters.          |
+| `CHATGPT_ACCESS_TOKEN`       | —                         | Required 32+ character URL token for GET-only ChatGPT API.  |
+| `CHATGPT_RATE_LIMIT_MAX`     | `30`                      | ChatGPT requests per token per rate-limit window.           |
+| `X_BEARER_TOKEN`             | —                         | X Bearer token shared by all account slots.                 |
+| `X_ACCOUNT_<n>_USERNAME`     | —                         | Handle to expose in slot `n`.                               |
+| `X_ACCOUNT_<n>_ID`           | the handle                | Id used in URLs.                                            |
+| `X_ACCOUNT_<n>_LABEL`        | `@handle`                 | Display name.                                               |
+| `X_ACCOUNT_<n>_BEARER_TOKEN` | `X_BEARER_TOKEN`          | Per-account token override.                                 |
+| `X_USERNAME`                 | —                         | Shorthand for a single account.                             |
+| `PORT`                       | `3000`                    | Listen port. Render sets this.                              |
+| `HOST`                       | `0.0.0.0`                 | Listen address.                                             |
+| `LOG_LEVEL`                  | `info`                    | Pino log level.                                             |
+| `REQUIRE_HTTPS`              | on in production          | Reject plaintext HTTP on `/v1`.                             |
+| `TRUST_PROXY`                | `true`                    | Read `X-Forwarded-*`. Required behind a TLS-terminating LB. |
+| `CORS_ORIGINS`               | none                      | Browser origins allowed. Empty blocks all.                  |
+| `ENABLE_DOCS`                | `true`                    | Serve `/docs`.                                              |
+| `RATE_LIMIT_MAX`             | `60`                      | Requests per key per window.                                |
+| `RATE_LIMIT_WINDOW_SECONDS`  | `60`                      | Window length.                                              |
+| `CACHE_TTL_SECONDS`          | `300`                     | How long X data is reused.                                  |
+| `ANALYTICS_TWEET_LIMIT`      | `100`                     | Posts per account in the window (5–100).                    |
+| `SYNC_POST_LIMIT`            | `500`                     | Posts paginated per persistent sync (5–3200).               |
+| `TOP_TWEETS_COUNT`           | `5`                       | Top posts returned per account.                             |
+| `X_API_BASE_URL`             | `https://api.x.com/2`     | Upstream base URL.                                          |
+| `X_TIMEOUT_MS`               | `10000`                   | Upstream request timeout.                                   |
+| `CREDENTIAL_ENCRYPTION_KEY`  | —                         | Required key used to encrypt all account token sets.        |
+| `X_CLIENT_ID`                | —                         | One shared X developer application client ID.               |
+| `X_CLIENT_SECRET`            | —                         | Shared confidential-client secret, when applicable.         |
+| `DATA_FILE`                  | `./data/x-analytics.json` | Durable encrypted connection and analytics store.           |
+| `SYNC_INTERVAL_SECONDS`      | `900`                     | Background snapshot interval.                               |
 
 ## Security notes
 
@@ -328,10 +406,14 @@ list.
   with 403 before the key is even examined, and HSTS is sent. `/healthz` stays
   reachable over HTTP so a platform health check inside the private network
   still works.
-- **Secrets never appear in output.** X tokens are never returned in any
-  response, and `Authorization` and `Cookie` headers are redacted from logs. An
+- **Secrets never appear in output.** X tokens and internal secret references
+  are never returned. Authorization, cookie, access-token, refresh-token, and
+  client-secret fields are redacted from logs. An
   upstream rejection is reported as `upstream_unauthorized` without echoing the
   credential. Tests assert both.
+- **ChatGPT is read-only.** `/api/chatgpt/:token/:account` has one GET route;
+  no POST, PUT, DELETE, connection health, OAuth, or secret data is reachable
+  through it. Its path token is redacted from application logs and error text.
 - **No browser access by default.** `CORS_ORIGINS` is empty, so no web origin
   can call the API until you name one.
 - **Rate limited per key**, keyed by a hash of the presented key rather than the
@@ -359,6 +441,14 @@ src/
     v1.ts                   the authenticated endpoints
   services/
     analyticsService.ts     caching, per-account isolation
+    connectionService.ts    auto-detection, OAuth lifecycle, sync and summaries
+  security/
+    credentialVault.ts      AES-256-GCM account credential encryption
+  storage/
+    repository.ts           atomic durable history and connection store
+    types.ts                persistent record definitions
+  openapi/
+    schemas.ts              reusable field-level API documentation
   x/
     client.ts               X API v2 client, upstream error mapping
     analytics.ts            pure metric computation
@@ -366,7 +456,8 @@ src/
   lib/
     cache.ts                TTL cache with in-flight de-duplication
     errors.ts               error types and the response envelope
-tests/                      64 tests over config, auth, metrics and routes
+tests/                      unit and end-to-end tests over auth, metrics, routes,
+                            encrypted connections and persistent history
 ```
 
 ## Tests

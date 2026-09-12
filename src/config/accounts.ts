@@ -50,7 +50,10 @@ function read(source: NodeJS.ProcessEnv, key: string): string | undefined {
  *
  * A single account may also be configured with just X_USERNAME + X_BEARER_TOKEN.
  */
-export function loadAccounts(source: NodeJS.ProcessEnv = process.env): XAccountConfig[] {
+export function loadAccounts(
+  source: NodeJS.ProcessEnv = process.env,
+  options: { allowEmpty?: boolean } = {},
+): XAccountConfig[] {
   const sharedToken = read(source, "X_BEARER_TOKEN");
   const slots = Object.keys(source)
     .map((key) => SLOT_PATTERN.exec(key)?.[1])
@@ -102,7 +105,7 @@ export function loadAccounts(source: NodeJS.ProcessEnv = process.env): XAccountC
     });
   }
 
-  if (accounts.length === 0) {
+  if (accounts.length === 0 && !options.allowEmpty) {
     throw new ConfigError(
       "No X accounts configured. Set X_ACCOUNT_1_USERNAME (and a Bearer token) to expose " +
         "at least one account. See .env.example.",

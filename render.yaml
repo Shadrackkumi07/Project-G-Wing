@@ -24,25 +24,34 @@ services:
         value: "60"
       - key: RATE_LIMIT_WINDOW_SECONDS
         value: "60"
+      - key: CHATGPT_RATE_LIMIT_MAX
+        value: "30"
       - key: CACHE_TTL_SECONDS
         value: "300"
       - key: ANALYTICS_TWEET_LIMIT
         value: "100"
       - key: TOP_TWEETS_COUNT
         value: "5"
+      - key: SYNC_POST_LIMIT
+        value: "500"
+      - key: DATA_FILE
+        value: /var/data/x-analytics.json
+      - key: SYNC_INTERVAL_SECONDS
+        value: "900"
 
       # Secrets: sync:false keeps them out of this file. Set each one in the
       # Render dashboard under the service's Environment tab.
       - key: API_KEY_HASHES
         sync: false
-      - key: X_BEARER_TOKEN
+      - key: CHATGPT_ACCESS_TOKEN
         sync: false
-
-      # Accounts to expose. Add X_ACCOUNT_2_*, X_ACCOUNT_3_* and so on in the
-      # dashboard for further handles.
-      - key: X_ACCOUNT_1_USERNAME
+      - key: CREDENTIAL_ENCRYPTION_KEY
         sync: false
-      - key: X_ACCOUNT_1_ID
+      - key: X_CLIENT_ID
         sync: false
-      - key: X_ACCOUNT_1_LABEL
+      - key: X_CLIENT_SECRET
         sync: false
+    disk:
+      name: analytics-data
+      mountPath: /var/data
+      sizeGB: 1

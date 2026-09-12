@@ -33,6 +33,32 @@ export interface XTweetPublicMetrics {
   impression_count?: number;
 }
 
+export interface XTweetPrivateMetrics {
+  impression_count?: number;
+  url_link_clicks?: number;
+  user_profile_clicks?: number;
+  like_count?: number;
+  reply_count?: number;
+  retweet_count?: number;
+}
+
+export interface XTweetOrganicMetrics extends XTweetPrivateMetrics {
+  like_count?: number;
+  reply_count?: number;
+  retweet_count?: number;
+}
+
+export interface XEntitySet {
+  urls?: Array<{ expanded_url?: string; url?: string }>;
+  hashtags?: Array<{ tag: string }>;
+  mentions?: Array<{ username: string }>;
+}
+
+export interface XMedia {
+  media_key: string;
+  type: "photo" | "video" | "animated_gif" | string;
+}
+
 export type XReferencedTweetType = "retweeted" | "quoted" | "replied_to";
 
 export interface XReferencedTweet {
@@ -46,10 +72,17 @@ export interface XTweet {
   created_at?: string;
   lang?: string;
   public_metrics?: XTweetPublicMetrics;
+  non_public_metrics?: XTweetPrivateMetrics;
+  organic_metrics?: XTweetOrganicMetrics;
   referenced_tweets?: XReferencedTweet[];
+  attachments?: { media_keys?: string[] };
+  entities?: XEntitySet;
+  conversation_id?: string;
+  possibly_sensitive?: boolean;
 }
 
 export interface XTweetsPage {
   tweets: XTweet[];
   resultCount: number;
+  media: XMedia[];
 }

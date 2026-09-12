@@ -8,6 +8,8 @@ coverage/
 
 *.log
 npm-debug.log*
+data/*.json
+data/*.tmp
 
 .DS_Store
 .idea/

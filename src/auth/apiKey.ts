@@ -68,6 +68,20 @@ export class ApiKeyStore {
     return new ApiKeyStore(digests);
   }
 
+  /**
+   * A single URL-carried read-only token. It is hashed immediately, exactly as
+   * API keys are, so the process does not retain a usable copy in its store.
+   */
+  static fromSingleSecret(secret: string | undefined, environmentName: string): ApiKeyStore {
+    if (!secret || secret.length < 32) {
+      throw new ConfigError(
+        `${environmentName} must be a random URL-safe secret of at least 32 characters. ` +
+          `Generate one with: node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`,
+      );
+    }
+    return new ApiKeyStore([sha256(secret)]);
+  }
+
   get size(): number {
     return this.digests.length;
   }
